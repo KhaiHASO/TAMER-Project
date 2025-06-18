@@ -25,7 +25,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-data/
+data/crohme
 # Lightning /research  
 test_tube_exp/
 tests/tests_tt_dir/
