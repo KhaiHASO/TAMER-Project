@@ -43,8 +43,9 @@ checkpoint_callback = ModelCheckpoint(
 # Cấu hình Trainer
 trainer = Trainer(
     callbacks=[lr_monitor, checkpoint_callback],  # Cập nhật theo đúng cách sử dụng callbacks
-    devices=1,  # Thay gpus thành devices
-    accelerator="auto",  # Tự động phát hiện và sử dụng GPU hoặc TPU
+    devices=2,  # Sử dụng 2 GPU
+    accelerator="gpu",  # Chỉ định accelerator là GPU
+    strategy="ddp",  # Sử dụng DistributedDataParallel cho multi-GPU
     check_val_every_n_epoch=2,
     max_epochs=400,
     deterministic=True,  # Đảm bảo tính tái sản xuất kết quả
