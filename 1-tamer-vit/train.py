@@ -52,12 +52,13 @@ checkpoint_callback = ModelCheckpoint(
 
 # Cấu hình Trainer
 trainer = Trainer(
-    callbacks=[lr_monitor, checkpoint_callback],  # Cập nhật theo đúng cách sử dụng callbacks
-    devices=1,  # Sử dụng 1 device (CPU)
-    accelerator="cpu",  # Chỉ định sử dụng CPU
-    check_val_every_n_epoch=2,  # Kiểm tra validation mỗi 2 epoch
-    max_epochs=50,  # Số lượng epoch tối đa
-    deterministic=True,  # Đảm bảo tính tái sản xuất kết quả
+    callbacks=[lr_monitor, checkpoint_callback],
+    devices=2,                # Sử dụng 2 GPU
+    accelerator="gpu",        # Dùng GPU
+    strategy="ddp",           # DistributedDataParallel
+    check_val_every_n_epoch=2,
+    max_epochs=50,
+    deterministic=True,
 )
 
 # Huấn luyện mô hình
