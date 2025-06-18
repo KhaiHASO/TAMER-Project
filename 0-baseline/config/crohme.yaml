@@ -11,10 +11,11 @@ trainer:
         monitor: val_ExpRate
         mode: max
         filename: '{epoch}-{step}-{val_ExpRate:.4f}'
-  gpus: 1
-  accelerator: auto
+  gpus: 2
+  accelerator: gpu
+  strategy: ddp
   check_val_every_n_epoch: 2
-  max_epochs: 400
+  max_epochs: 50
   deterministic: true
 model:
   d_model: 256
