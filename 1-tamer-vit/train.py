@@ -3,6 +3,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning import seed_everything
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
+import os
 
 # Cấu hình seed cho tái sản xuất kết quả
 seed_everything(7)
@@ -41,13 +42,19 @@ model = LitTAMER(
     milestones=[300, 350]
 )
 
+# Tạo thư mục checkpoints nếu chưa tồn tại
+checkpoint_dir = "/kaggle/working/checkpoints"  # Đảm bảo sử dụng thư mục trong Kaggle
+if not os.path.exists(checkpoint_dir):
+    os.makedirs(checkpoint_dir)
+
 # Các Callbacks
 lr_monitor = LearningRateMonitor(logging_interval="epoch")
 checkpoint_callback = ModelCheckpoint(
+    dirpath=checkpoint_dir,  # Đường dẫn lưu checkpoint
     save_top_k=1,
-    monitor="val_ExpRate",  # Theo dõi giá trị val_ExpRate
+    monitor="val_ExpRate",  # Theo dõi giá trị `val_ExpRate`
     mode="max",  # Lưu mô hình khi giá trị `val_ExpRate` cao nhất
-    filename="{epoch}-{step}-{val_ExpRate:.4f}",  # Tên file lưu checkpoint
+    filename="{epoch}-{step}-{val_ExpRate:.4f}",  # Tên file checkpoint
 )
 
 # Cấu hình Trainer
@@ -63,3 +70,4 @@ trainer = Trainer(
 
 # Huấn luyện mô hình
 trainer.fit(model, datamodule=datamodule)
+
