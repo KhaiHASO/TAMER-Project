@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from einops.einops import rearrange
 from torch import FloatTensor, LongTensor
 import timm
+import cv2
+import torchvision.transforms as T
 
 from .pos_enc import ImgPosEnc
 
@@ -29,10 +31,10 @@ class VisionTransformer(nn.Module):
     ):
         super().__init__()
         
-        # Load pretrained ViT model
+        # Load ViT model với pretrained=False để tránh lỗi mismatch
         self.vit = timm.create_model(
             'vit_base_patch16_224',
-            pretrained=True,
+            pretrained=False,  # Để False vì dùng custom cấu hình
             img_size=img_size,
             patch_size=patch_size,
             in_chans=in_chans,
@@ -60,7 +62,20 @@ class VisionTransformer(nn.Module):
         # ViT outputs [B, N, C] where N = (H/P) * (W/P)
         # We need to reshape to [B, H/P, W/P, C]
         B, N, C = features.shape
-        H = W = int(math.sqrt(N))
+        
+        # Tính toán đúng kích thước H, W dựa trên số patch thực tế
+        # N = (H/P) * (W/P) = (224/16) * (224/16) = 14 * 14 = 196
+        # Nhưng có thể có thêm 1 patch cho cls_token
+        if N == 197:  # 196 + 1 (cls_token)
+            H = W = 14
+            # Bỏ qua cls_token, chỉ lấy patch tokens
+            features = features[:, 1:, :]  # Remove cls_token
+        elif N == 196:  # Chỉ có patch tokens
+            H = W = 14
+        else:
+            # Fallback: tính toán dựa trên sqrt
+            H = W = int(math.sqrt(N))
+        
         features = features.reshape(B, H, W, C)
         
         # Update mask to match new dimensions
