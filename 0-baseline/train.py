@@ -52,7 +52,7 @@ early_stopping = EarlyStopping(
 # Cấu hình Trainer
 trainer = Trainer(
     callbacks=[lr_monitor, checkpoint_callback, early_stopping],
-    devices=1,
+    devices=2,
     accelerator="auto",
     check_val_every_n_epoch=2,
     max_epochs=80,
