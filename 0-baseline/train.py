@@ -1,8 +1,11 @@
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import seed_everything
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
+import shutil
+import os
 
 # Cấu hình seed cho tái sản xuất kết quả
 seed_everything(7)
@@ -39,16 +42,33 @@ checkpoint_callback = ModelCheckpoint(
     mode="max",
     filename="{epoch}-{step}-{val_ExpRate:.4f}",
 )
+early_stopping = EarlyStopping(
+    monitor="val_ExpRate",
+    patience=20,
+    mode="max",
+    verbose=True
+)
 
 # Cấu hình Trainer
 trainer = Trainer(
-    callbacks=[lr_monitor, checkpoint_callback],  # Cập nhật theo đúng cách sử dụng callbacks
-    devices=1,  # Thay gpus thành devices
-    accelerator="auto",  # Tự động phát hiện và sử dụng GPU hoặc TPU
+    callbacks=[lr_monitor, checkpoint_callback, early_stopping],
+    devices=1,
+    accelerator="auto",
     check_val_every_n_epoch=2,
-    max_epochs=400,
-    deterministic=True,  # Đảm bảo tính tái sản xuất kết quả
+    max_epochs=80,
+    deterministic=True,
 )
 
 # Huấn luyện mô hình
 trainer.fit(model, datamodule=datamodule)
+
+# Đường dẫn file checkpoint tốt nhất
+src = checkpoint_callback.best_model_path
+if src:
+    # Lấy tên file gốc
+    filename = os.path.basename(src)
+    dst = f"/kaggle/working/{filename}"
+    shutil.copy(src, dst)
+    print(f"Checkpoint đã được sao chép tới: {dst}")
+else:
+    print("Không tìm thấy checkpoint tốt nhất để sao chép!")

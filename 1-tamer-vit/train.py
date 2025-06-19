@@ -1,25 +1,17 @@
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import seed_everything
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
+import shutil
 import os
 
 # Cấu hình seed cho tái sản xuất kết quả
 seed_everything(7)
 
-# Khởi tạo các đối tượng dữ liệu và mô hình với các tham số bổ sung từ config
-datamodule = HMEDatamodule(
-    folder="data/crohme",  # Thư mục dữ liệu
-    test_folder="2014",  # Thư mục test
-    max_size=320000,  # Giới hạn kích thước tối đa
-    scale_to_limit=True,  # Nếu có scale
-    train_batch_size=8,  # Batch size cho huấn luyện
-    eval_batch_size=2,  # Batch size cho kiểm tra
-    num_workers=5,  # Số lượng worker cho DataLoader
-    scale_aug=False  # Điều chỉnh augmentation nếu cần
-)
-
+# Khởi tạo các đối tượng dữ liệu và mô hình
+datamodule = HMEDatamodule()
 model = LitTAMER(
     d_model=256,
     growth_rate=24,
@@ -29,7 +21,7 @@ model = LitTAMER(
     dim_feedforward=1024,
     dc=32,
     dropout=0.3,
-    vocab_size=113,  # 110 + 3
+    vocab_size=113,
     cross_coverage=True,
     self_coverage=True,
     beam_size=10,
@@ -42,32 +34,41 @@ model = LitTAMER(
     milestones=[300, 350]
 )
 
-# Tạo thư mục checkpoints nếu chưa tồn tại
-checkpoint_dir = "/kaggle/working/checkpoints"  # Đảm bảo sử dụng thư mục trong Kaggle
-if not os.path.exists(checkpoint_dir):
-    os.makedirs(checkpoint_dir)
-
 # Các Callbacks
 lr_monitor = LearningRateMonitor(logging_interval="epoch")
 checkpoint_callback = ModelCheckpoint(
-    dirpath=checkpoint_dir,  # Đường dẫn lưu checkpoint
     save_top_k=1,
-    monitor="val_ExpRate",  # Theo dõi giá trị `val_ExpRate`
-    mode="max",  # Lưu mô hình khi giá trị `val_ExpRate` cao nhất
-    filename="{epoch}-{step}-{val_ExpRate:.4f}",  # Tên file checkpoint
+    monitor="val_ExpRate",
+    mode="max",
+    filename="{epoch}-{step}-{val_ExpRate:.4f}",
+)
+early_stopping = EarlyStopping(
+    monitor="val_ExpRate",
+    patience=20,
+    mode="max",
+    verbose=True
 )
 
 # Cấu hình Trainer
 trainer = Trainer(
-    callbacks=[lr_monitor, checkpoint_callback],
-    devices=2,                # Sử dụng 2 GPU
-    accelerator="gpu",        # Dùng GPU
-    strategy="ddp",           # DistributedDataParallel
+    callbacks=[lr_monitor, checkpoint_callback, early_stopping],
+    devices=1,
+    accelerator="auto",
     check_val_every_n_epoch=2,
-    max_epochs=50,
+    max_epochs=80,
     deterministic=True,
 )
 
 # Huấn luyện mô hình
 trainer.fit(model, datamodule=datamodule)
 
+# Đường dẫn file checkpoint tốt nhất
+src = checkpoint_callback.best_model_path
+if src:
+    # Lấy tên file gốc
+    filename = os.path.basename(src)
+    dst = f"/kaggle/working/{filename}"
+    shutil.copy(src, dst)
+    print(f"Checkpoint đã được sao chép tới: {dst}")
+else:
+    print("Không tìm thấy checkpoint tốt nhất để sao chép!")
