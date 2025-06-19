@@ -1,0 +1,6 @@
+pip install pytorch_lightning
+pip install torchvision
+pip install opencv-python
+pip install editdistance
+pip install einops
+pip install timm
