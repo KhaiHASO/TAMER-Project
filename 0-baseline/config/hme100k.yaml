@@ -11,7 +11,7 @@ trainer:
         monitor: val_ExpRate
         mode: max
         filename: '{epoch}-{step}-{val_ExpRate:.4f}'
-  gpus: 0
+  gpus: 0, 1,  2, 3
   accelerator: ddp
   max_epochs: 70
   deterministic: true
