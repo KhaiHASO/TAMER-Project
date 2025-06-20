@@ -13,8 +13,8 @@ datamodule = HMEDatamodule(
     max_size=320000,
     scale_to_limit=True,
     scale_aug=False,
-    train_batch_size=2,
-    eval_batch_size=2,
+    train_batch_size=1,
+    eval_batch_size=1,
     num_workers=0
 )
 
@@ -31,7 +31,7 @@ model = LitTAMER(
     vocab_size=113,
     cross_coverage=False,
     self_coverage=False,
-    beam_size=5,
+    beam_size=1,
     max_len=40,
     alpha=1.0,
     early_stopping=False,
@@ -58,3 +58,4 @@ trainer = Trainer(
 
 print("\n--- BẮT ĐẦU OVERFIT TEST TRÊN 1 BATCH ---\n")
 trainer.fit(model, datamodule=datamodule)
+##có theo dõi ko vậy 

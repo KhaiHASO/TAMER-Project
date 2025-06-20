@@ -98,6 +98,10 @@ class LitTAMER(LightningModule):
             gt_tokens = vocab.indices2words(batch.indices[0])
             print("[DEBUG] Pred:", pred_tokens)
             print("[DEBUG] GT:  ", gt_tokens)
+            print(f"[DEBUG] len(Pred): {len(pred_tokens)}, len(GT): {len(gt_tokens)}")
+            print("[DEBUG] Pred idx:", hyps[0].seq)
+            print("[DEBUG] GT idx:  ", batch.indices[0])
+
             
 
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
