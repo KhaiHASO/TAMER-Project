@@ -74,7 +74,7 @@ class VisionTransformer(nn.Module):
             H = W = 14
         else:
             # Fallback: tính toán dựa trên sqrt
-            H = W = int(math.sqrt(N))
+        H = W = int(math.sqrt(N))
         
         features = features.reshape(B, H, W, C)
         

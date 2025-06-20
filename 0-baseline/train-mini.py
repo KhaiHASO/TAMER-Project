@@ -31,7 +31,7 @@ model = LitTAMER(
     vocab_size=113,
     cross_coverage=False,
     self_coverage=False,
-    beam_size=1,
+    beam_size=5,
     max_len=40,
     alpha=1.0,
     early_stopping=False,
@@ -46,11 +46,11 @@ lr_monitor = LearningRateMonitor(logging_interval="step")
 
 # Trainer cấu hình để overfit 1 batch duy nhất
 trainer = Trainer(
-    accelerator="gpu",
-    devices=1,
+    accelerator="cpu",
+    # devices=1,
     precision=32,
     callbacks=[lr_monitor],
-    max_epochs=200,
+    max_epochs=50,
     overfit_batches=1,
     deterministic=True,
     log_every_n_steps=1

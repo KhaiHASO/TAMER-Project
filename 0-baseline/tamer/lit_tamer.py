@@ -1,19 +1,22 @@
 import zipfile
-from typing import List
-import editdistance
 import json
-import pytorch_lightning as pl
+import editdistance
+from typing import List
+
 import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
 
+from lightning.pytorch import LightningModule
+
 from tamer.datamodule import Batch, vocab
 from tamer.model.tamer import TAMER
 from tamer.utils.utils import (
-    ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out, to_struct_output)
+    ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out, to_struct_output
+)
 
 
-class LitTAMER(pl.LightningModule):
+class LitTAMER(LightningModule):
     def __init__(
         self,
         d_model: int,
@@ -62,22 +65,6 @@ class LitTAMER(pl.LightningModule):
     def forward(
         self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
     ) -> FloatTensor:
-        """run img and bi-tgt
-
-        Parameters
-        ----------
-        img : FloatTensor
-            [b, 1, h, w]
-        img_mask: LongTensor
-            [b, h, w]
-        tgt : LongTensor
-            [2b, l]
-
-        Returns
-        -------
-        FloatTensor
-            [2b, l, vocab_size]
-        """
         return self.tamer_model(img, img_mask, tgt)
 
     def training_step(self, batch: Batch, _):
@@ -86,18 +73,11 @@ class LitTAMER(pl.LightningModule):
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
-        self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
         struct_loss = ce_loss(sim, struct_out, ignore_idx=-1)
-        self.log(
-            "train/struct_loss",
-            struct_loss,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
+        self.log("train/struct_loss", struct_loss, on_step=False, on_epoch=True)
 
         return loss + struct_loss
-
 
     def validation_step(self, batch: Batch, _):
         tgt, out = to_bi_tgt_out(batch.indices, self.device)
@@ -105,44 +85,25 @@ class LitTAMER(pl.LightningModule):
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
-        self.log(
-            "val_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
         struct_loss = ce_loss(sim, struct_out, ignore_idx=-1)
-        self.log(
-            "val/struct_loss",
-            struct_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
 
-        # if self.current_epoch < self.hparams.milestones[0]:
-        #     self.log(
-        #         "val_ExpRate",
-        #         self.exprate_recorder,
-        #         prog_bar=True,
-        #         on_step=False,
-        #         on_epoch=True,
-        #     )
-        #     return
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/struct_loss", struct_loss, on_step=False, on_epoch=True)
 
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
 
+        # DEBUG
+        if len(hyps) > 0:
+            pred_tokens = vocab.indices2words(hyps[0].seq)
+            gt_tokens = vocab.indices2words(batch.indices[0])
+            print("[DEBUG] Pred:", pred_tokens)
+            print("[DEBUG] GT:  ", gt_tokens)
+            
+
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
-        self.log(
-            "val_ExpRate",
-            self.exprate_recorder,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-        )
+
+        exprate = self.exprate_recorder.compute()
+        self.log("val_ExpRate", exprate, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch: Batch, _):
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
@@ -152,30 +113,33 @@ class LitTAMER(pl.LightningModule):
 
         return batch.img_bases, preds, gts
 
-    def test_epoch_end(self, test_outputs) -> None:
+    def on_test_epoch_end(self):
         exprate = self.exprate_recorder.compute()
         print(f"Validation ExpRate: {exprate}")
         errors_dict = {}
         predictions_dict = {}
+
         with zipfile.ZipFile("result.zip", "w") as zip_f:
-            for img_bases, preds, gts in test_outputs:
+            for img_bases, preds, gts in self.test_outputs:
                 for img_base, pred, gt in zip(img_bases, preds, gts):
                     content = f"%{img_base}\n${pred}$".encode()
                     with zip_f.open(f"{img_base}.txt", "w") as f:
                         f.write(content)
-                    distance = editdistance.eval(pred, gt)
-                    if distance > 0:
+
+                    dist = editdistance.eval(pred, gt)
+                    if dist > 0:
                         errors_dict[img_base] = {
                             "pred": " ".join(pred),
                             "gt": " ".join(gt),
-                            "dist": distance,
+                            "dist": dist,
                         }
 
                     predictions_dict[img_base] = {
                         "pred": " ".join(pred),
                         "gt": " ".join(gt),
-                        "dist": distance,
+                        "dist": dist,
                     }
+
         with open("errors.json", "w") as f:
             json.dump(errors_dict, f)
         with open("predictions.json", "w") as f:
@@ -193,26 +157,9 @@ class LitTAMER(pl.LightningModule):
             eps=1e-6,
             weight_decay=1e-4,
         )
-        # optimizer = optim.AdamW(
-        #     self.parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4
-        # )
 
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=self.hparams.milestones, gamma=0.1
         )
-        # reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer,
-        #     mode="max",
-        #     factor=0.25,
-        #     patience=self.hparams.patience // self.trainer.check_val_every_n_epoch,
-        # )
-
-        # scheduler = {
-        #     "scheduler": reduce_scheduler,
-        #     "monitor": "val_ExpRate",
-        #     "interval": "epoch",
-        #     "frequency": self.trainer.check_val_every_n_epoch,
-        #     "strict": True,
-        # }
 
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
