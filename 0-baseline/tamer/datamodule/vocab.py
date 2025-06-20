@@ -6,12 +6,14 @@ class CROHMEVocab:
     PAD_IDX = 0
     SOS_IDX = 1
     EOS_IDX = 2
+    print("Đã vào vocab")
 
     def init(self, dict_path: str) -> None:
         self.word2idx = dict()
         self.word2idx["<pad>"] = self.PAD_IDX
         self.word2idx["<sos>"] = self.SOS_IDX
         self.word2idx["<eos>"] = self.EOS_IDX
+  
 
         with open(dict_path, "r") as f:
             for line in f.readlines():
@@ -43,3 +45,4 @@ if __name__ == '__main__':
     print(vocab.word2idx['<space>'])
     print(vocab.word2idx['{'], vocab.word2idx['}'],
           vocab.word2idx['^'], vocab.word2idx['_'])
+    

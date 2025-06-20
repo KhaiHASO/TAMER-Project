@@ -62,3 +62,4 @@ trainer = Trainer(
 
 # Huấn luyện mô hình
 trainer.fit(model, datamodule=datamodule)
+#lấy bản này 

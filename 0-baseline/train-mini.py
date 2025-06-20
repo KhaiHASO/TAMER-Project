@@ -1,11 +1,12 @@
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.loggers import TensorBoardLogger
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
 
 # Đặt seed để tái lập kết quả
 seed_everything(7, workers=True)
-
+logger = TensorBoardLogger("lightning_logs", name="overfit_test")
 # DataModule: dùng batch rất nhỏ để test overfit
 datamodule = HMEDatamodule(
     folder="data/crohme",
