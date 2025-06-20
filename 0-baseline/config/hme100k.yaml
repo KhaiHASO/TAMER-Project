@@ -2,10 +2,12 @@ seed_everything: 7
 trainer:
   checkpoint_callback: true
   callbacks:
-    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch
+.callbacks.LearningRateMonitor
       init_args:
         logging_interval: epoch
-    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+    - class_path: lightning.pytorch
+.callbacks.ModelCheckpoint
       init_args:
         save_top_k: 1
         monitor: val_ExpRate

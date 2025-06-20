@@ -1,21 +1,19 @@
 import zipfile
-import json
-import editdistance
 from typing import List
-
+import editdistance
+import json
+import lightning.pytorch as pl
 import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
-from lightning.pytorch import LightningModule
 
 from tamer.datamodule import Batch, vocab
 from tamer.model.tamer import TAMER
 from tamer.utils.utils import (
-    ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out, to_struct_output
-)
+    ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out, to_struct_output)
 
 
-class LitTAMER(LightningModule):
+class LitTAMER(pl.LightningModule):
     def __init__(
         self,
         d_model: int,
@@ -61,109 +59,127 @@ class LitTAMER(LightningModule):
 
         self.exprate_recorder = ExpRateRecorder()
 
-    def forward(self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor):
+    def forward(
+        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
+    ) -> FloatTensor:
+        """run img and bi-tgt
+
+        Parameters
+        ----------
+        img : FloatTensor
+            [b, 1, h, w]
+        img_mask: LongTensor
+            [b, h, w]
+        tgt : LongTensor
+            [2b, l]
+
+        Returns
+        -------
+        FloatTensor
+            [2b, l, vocab_size]
+        """
         return self.tamer_model(img, img_mask, tgt)
 
-    def training_step(self, batch: Batch, batch_idx):
+    def training_step(self, batch: Batch, _):
         tgt, out = to_bi_tgt_out(batch.indices, self.device)
         struct_out, _ = to_struct_output(batch.indices, self.device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
-        struct_loss = ce_loss(sim, struct_out, ignore_idx=-1)
-
         self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
-        self.log("train/struct_loss", struct_loss, on_step=False, on_epoch=True, sync_dist=True)
-
-        # ----------- DEBUG mỗi 10 bước ------------
-        if self.global_step % 10 == 0:
-            print(f"\n[TRAIN STEP {self.global_step}]")
-            print(f"  - tgt.shape: {tgt.shape}, out.shape: {out.shape}")
-            print(f"  - out_hat.shape: {out_hat.shape}, sim.shape: {sim.shape}")
-            print(f"  - loss: {loss.item():.4f}, struct_loss: {struct_loss.item():.4f}")
-            print(f"  - tgt[0]: {tgt[0].tolist()}")
-            print(f"  - out[0]: {out[0].tolist()}")
-            print("  - tgt (words):", vocab.indices2words(tgt[0].tolist()))
-            print("  - out (words):", vocab.indices2words(out[0].tolist()))
+        struct_loss = ce_loss(sim, struct_out, ignore_idx=-1)
+        self.log(
+            "train/struct_loss",
+            struct_loss,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
 
         return loss + struct_loss
 
-    def validation_step(self, batch: Batch, batch_idx):
+
+    def validation_step(self, batch: Batch, _):
         tgt, out = to_bi_tgt_out(batch.indices, self.device)
         struct_out, _ = to_struct_output(batch.indices, self.device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
+        self.log(
+            "val_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
         struct_loss = ce_loss(sim, struct_out, ignore_idx=-1)
+        self.log(
+            "val/struct_loss",
+            struct_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val/struct_loss", struct_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        # if self.current_epoch < self.hparams.milestones[0]:
+        #     self.log(
+        #         "val_ExpRate",
+        #         self.exprate_recorder,
+        #         prog_bar=True,
+        #         on_step=False,
+        #         on_epoch=True,
+        #     )
+        #     return
 
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
+
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
-        self.log("val_ExpRate", self.exprate_recorder, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(
+            "val_ExpRate",
+            self.exprate_recorder,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+        )
 
-        # ----------- DEBUG val prediction ------------
-        if batch_idx == 0:
-            pred_tokens = vocab.indices2words(hyps[0].seq)
-            gt_tokens = vocab.indices2words(batch.indices[0])
-            print(f"\n[VAL {self.current_epoch}]")
-            print(f"  - pred idx: {hyps[0].seq}")
-            print(f"  - gt   idx: {batch.indices[0]}")
-            print(f"  - pred: {' '.join(pred_tokens)}")
-            print(f"  - gt  : {' '.join(gt_tokens)}")
-
-    def test_step(self, batch: Batch, batch_idx):
+    def test_step(self, batch: Batch, _):
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
-
         gts = [vocab.indices2words(ind) for ind in batch.indices]
         preds = [vocab.indices2words(h.seq) for h in hyps]
-
-        # ----------- DEBUG test ------------
-        if batch_idx == 0:
-            print(f"\n[TEST SAMPLE]")
-            print(f"  - GT   : {' '.join(gts[0])}")
-            print(f"  - Pred : {' '.join(preds[0])}")
 
         return batch.img_bases, preds, gts
 
     def test_epoch_end(self, test_outputs) -> None:
         exprate = self.exprate_recorder.compute()
-        print(f"\n[FINAL TEST] ExpRate: {exprate:.4f}")
-
+        print(f"Validation ExpRate: {exprate}")
         errors_dict = {}
         predictions_dict = {}
-
         with zipfile.ZipFile("result.zip", "w") as zip_f:
             for img_bases, preds, gts in test_outputs:
                 for img_base, pred, gt in zip(img_bases, preds, gts):
                     content = f"%{img_base}\n${pred}$".encode()
                     with zip_f.open(f"{img_base}.txt", "w") as f:
                         f.write(content)
-
-                    dist = editdistance.eval(pred, gt)
-                    if dist > 0:
+                    distance = editdistance.eval(pred, gt)
+                    if distance > 0:
                         errors_dict[img_base] = {
                             "pred": " ".join(pred),
                             "gt": " ".join(gt),
-                            "dist": dist,
+                            "dist": distance,
                         }
 
                     predictions_dict[img_base] = {
                         "pred": " ".join(pred),
                         "gt": " ".join(gt),
-                        "dist": dist,
+                        "dist": distance,
                     }
-
         with open("errors.json", "w") as f:
-            json.dump(errors_dict, f, indent=2)
+            json.dump(errors_dict, f)
         with open("predictions.json", "w") as f:
-            json.dump(predictions_dict, f, indent=2)
-
-    def on_train_epoch_start(self):
-        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-        print(f"\n[Epoch {self.current_epoch} Start] Learning Rate: {lr:.6f}")
+            json.dump(predictions_dict, f)
 
     def approximate_joint_search(
         self, img: FloatTensor, mask: LongTensor
@@ -177,7 +193,26 @@ class LitTAMER(LightningModule):
             eps=1e-6,
             weight_decay=1e-4,
         )
+        # optimizer = optim.AdamW(
+        #     self.parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4
+        # )
+
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=self.hparams.milestones, gamma=0.1
         )
+        # reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer,
+        #     mode="max",
+        #     factor=0.25,
+        #     patience=self.hparams.patience // self.trainer.check_val_every_n_epoch,
+        # )
+
+        # scheduler = {
+        #     "scheduler": reduce_scheduler,
+        #     "monitor": "val_ExpRate",
+        #     "interval": "epoch",
+        #     "frequency": self.trainer.check_val_every_n_epoch,
+        #     "strict": True,
+        # }
+
         return {"optimizer": optimizer, "lr_scheduler": scheduler}

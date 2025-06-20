@@ -1,8 +1,7 @@
 import os
 import json
 import typer
-from pytorch_lightning import Trainer, seed_everything
-
+from lightning.pytorch import Trainer, seed_everything
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
 

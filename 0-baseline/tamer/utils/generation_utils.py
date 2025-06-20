@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import List, Tuple
 
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch
 import torch.nn.functional as F
 from tamer.datamodule import vocab
