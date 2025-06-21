@@ -47,15 +47,56 @@
 ## Install dependencies   
 ```bash
 cd TAMER
-# install project   
-conda create -y -n TAMER python=3.11
-conda activate TAMER
-# Install PyTorch ecosystem
-pip install torch==2.1.2 torchvision==0.16.2
-# Install Lightning and other dependencies
+
+# Phương pháp 1: Sử dụng script cài đặt tự động
+chmod +x setup_env.sh
+./setup_env.sh
+
+# Phương pháp 2: Cài đặt thủ công
+# Tạo môi trường Python venv
+python -m venv env
+source env/bin/activate
+
+# Cài đặt PyTorch (quan trọng: cài đặt PyTorch trước)
+# Cho CUDA (GPU):
+pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu121
+
+# HOẶC cho CPU:
+pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cpu
+
+# Cài đặt Lightning và các thư viện liên quan
+pip install lightning==2.2.1 pytorch-lightning==2.2.1 lightning-utilities==0.10.0
+
+# Cài đặt các dependencies khác
 pip install -r requirements.txt
+
+# Cài đặt project
 pip install -e .
- ```
+```
+
+### Xử lý các lỗi cài đặt phổ biến
+
+Nếu bạn gặp lỗi `ModuleNotFoundError: No module named 'torch._C'`:
+- Gỡ cài đặt PyTorch: `pip uninstall torch torchvision -y`
+- Cài đặt lại PyTorch với lệnh phù hợp ở trên
+- Đảm bảo cài đặt PyTorch TRƯỚC khi cài đặt pytorch-lightning
+
+## Cài đặt trên Kaggle
+
+Để cài đặt trên Kaggle:
+1. Tạo một notebook mới
+2. Trong cell đầu tiên, thêm:
+```python
+# Cài đặt các thư viện cần thiết
+!pip install einops==0.7.0 editdistance==0.6.2 pytorch-lightning==2.2.1 torchmetrics==1.2.1 jsonargparse[signatures]==4.27.1 typer==0.9.0
+```
+3. Clone repository và cài đặt:
+```python
+!git clone https://github.com/your-username/TAMER.git
+%cd TAMER
+!pip install -e .
+```
+
 ## Dataset Preparation
 We have prepared the CROHME dataset and HME100K dataset in [download link](https://disk.pku.edu.cn/link/AAF10CCC4D539543F68847A9010C607139). After downloading, please extract it to the `data/` folder.
 
@@ -69,6 +110,12 @@ python -u train.py --config config/crohme.yaml
 For single gpu user, you may change the `config.yaml` file to
 ```yaml
 devices: 1
+```
+
+For CPU-only training:
+```yaml
+devices: 1
+accelerator: cpu
 ```
 
 ## Training on HME100k Dataset

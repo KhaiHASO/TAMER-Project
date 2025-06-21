@@ -1,13 +1,13 @@
 import os
 import json
 import typer
-from pytorch_lightning import Trainer, seed_everything
+from lightning.pytorch import Trainer, seed_everything
 
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
 
 seed_everything(7)
-years = {'2014': 986, '2016': 1147, '2019': 1199, 'test': 24607}
+years = {'2014': 986, '2016': 1147, '2019': 1199, 'test': 24607, 'testb': 24607}
 
 
 def main(
@@ -20,7 +20,16 @@ def main(
     ckp_path = os.path.join(ckp_folder, fnames[0])
     print(f"Test with fname: {fnames[0]}")
 
-    trainer = Trainer(logger=False, accelerator="gpu", devices=1)
+    # Kiểm tra GPU, nếu không có GPU thì dùng CPU
+    try:
+        import torch
+        if torch.cuda.is_available():
+            trainer = Trainer(logger=False, accelerator="gpu", devices=1)
+        else:
+            trainer = Trainer(logger=False, accelerator="cpu")
+    except:
+        # Fallback to CPU if there are GPU issues
+        trainer = Trainer(logger=False, accelerator="cpu")
 
     dm = HMEDatamodule(
         folder=folder,
