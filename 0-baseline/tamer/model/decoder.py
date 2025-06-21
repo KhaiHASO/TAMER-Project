@@ -194,4 +194,11 @@ class Decoder(DecodeModel):
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
         assert len(src) == 1 and len(src_mask) == 1
+        
+        # Ensure all tensors are on the same device
+        device = self.device
+        src[0] = src[0].to(device)
+        src_mask[0] = src_mask[0].to(device)
+        input_ids = input_ids.to(device)
+        
         return self(src[0], src_mask[0], input_ids)

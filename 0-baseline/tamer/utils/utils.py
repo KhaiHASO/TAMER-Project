@@ -113,7 +113,10 @@ def to_tgt_output(
     assert direction in {"l2r", "r2l"}
 
     if isinstance(tokens[0], list):
-        tokens = [torch.tensor(t, dtype=torch.long) for t in tokens]
+        tokens = [torch.tensor(t, dtype=torch.long, device=device) for t in tokens]
+    else:
+        # Ensure tensors are on the correct device
+        tokens = [t.to(device=device, dtype=torch.long) for t in tokens]
 
     if direction == "l2r":
         tokens = tokens
@@ -184,7 +187,10 @@ def to_struct_output(
     device: torch.device,
 ) -> LongTensor:
     if isinstance(indices[0], torch.Tensor):
-        indices = [t.tolist() for t in indices]
+        # Ensure tensors are on the correct device
+        indices = [t.to(device=device).tolist() for t in indices]
+    else:
+        indices = [t for t in indices]  # Make a copy to be safe
 
     structs = []
     illegal = []
@@ -210,11 +216,12 @@ def to_struct_output(
     )
 
     for i, struct in enumerate(structs):
-        l2r_out[i, : lens[i]] = torch.tensor(struct, dtype=torch.long)
+        l2r_out[i, : lens[i]] = torch.tensor(struct, dtype=torch.long, device=device)
         l2r_out[i, lens[i]] = lens[i] - 1
         r2l_out[i, : lens[i]] = torch.tensor(
             [lens[i] - p - 1 if p != -1 else -1 for p in reversed(struct)],
             dtype=torch.long,
+            device=device,
         )
         r2l_out[i, lens[i]] = lens[i] - 1
 
