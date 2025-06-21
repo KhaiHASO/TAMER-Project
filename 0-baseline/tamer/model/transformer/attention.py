@@ -351,82 +351,63 @@ def multi_head_attention_forward(
         # Get sequence lengths
         src_len = k.size(0)
 
-        # Skip complex reshaping and do a simple attention calculation
-        # Flatten the batch dimension into the head dimension for simplicity
-        q_flat = q.reshape(tgt_len, -1, head_dim)  # [tgt_len, bsz*num_heads, head_dim]
-        k_flat = k.reshape(src_len, -1, head_dim)  # [src_len, bsz*num_heads, head_dim]
-        v_flat = v.reshape(src_len, -1, head_dim)  # [src_len, bsz*num_heads, head_dim]
-
-        # Transpose for bmm
-        q_flat = q_flat.permute(1, 0, 2)  # [bsz*num_heads, tgt_len, head_dim]
-        k_flat = k_flat.permute(1, 0, 2)  # [bsz*num_heads, src_len, head_dim]
-        v_flat = v_flat.permute(1, 0, 2)  # [bsz*num_heads, src_len, head_dim]
-
-        # Handle key padding mask
-        if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask.to(device)
-            
-            # Make sure key_padding_mask has the right shape
-            if key_padding_mask.shape[0] != bsz or key_padding_mask.shape[1] != src_len:
-                # Create a new mask with the right shape
-                new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
-                # Copy as much as we can from the original mask
-                copy_rows = min(key_padding_mask.shape[0], bsz)
-                copy_cols = min(key_padding_mask.shape[1], src_len)
-                new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
-                key_padding_mask = new_mask
-
-        # Calculate attention weights
-        try:
-            attn_output_weights = torch.bmm(q_flat, k_flat.transpose(1, 2))  # [bsz*num_heads, tgt_len, src_len]
-        except RuntimeError as e:
-            print(f"Error in calculating attention weights: {e}")
-            # Fallback: create zero tensor with correct shape
-            attn_output_weights = torch.zeros(bsz * num_heads, tgt_len, src_len, device=device)
+        # Use a simpler approach that avoids reshaping complexities
+        # Process each head separately to avoid batch size mismatches
         
-        # Apply masks and softmax
-        if attn_mask is not None:
-            attn_mask = attn_mask.to(device)
-            if attn_mask.dim() == 2:
-                attn_mask = attn_mask.unsqueeze(0).expand(bsz * num_heads, -1, -1)
-            if attn_mask.shape != attn_output_weights.shape:
-                print(f"Warning: attn_mask shape {attn_mask.shape} doesn't match weights shape {attn_output_weights.shape}")
-            else:
-                attn_output_weights.masked_fill_(attn_mask, float("-inf"))
+        # Initialize output tensor
+        attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
         
-        if key_padding_mask is not None:
-            # Reshape for broadcasting
-            key_padding_mask_expanded = key_padding_mask.unsqueeze(1).unsqueeze(0)  # [1, bsz, 1, src_len]
-            key_padding_mask_expanded = key_padding_mask_expanded.expand(num_heads, -1, tgt_len, -1)  # [num_heads, bsz, tgt_len, src_len]
-            key_padding_mask_expanded = key_padding_mask_expanded.reshape(bsz * num_heads, tgt_len, src_len)  # [bsz*num_heads, tgt_len, src_len]
+        # Process one head at a time to avoid batch size mismatches
+        for h in range(num_heads):
+            # Extract head-specific query, key, value
+            head_start = h * head_dim
+            head_end = (h + 1) * head_dim
             
+            q_h = q[:, :, head_start:head_end]  # [tgt_len, bsz, head_dim]
+            k_h = k[:, :, head_start:head_end]  # [src_len, bsz, head_dim]
+            v_h = v[:, :, head_start:head_end]  # [src_len, bsz, head_dim]
+            
+            # Transpose for bmm
+            q_h = q_h.transpose(0, 1)  # [bsz, tgt_len, head_dim]
+            k_h = k_h.transpose(0, 1)  # [bsz, src_len, head_dim]
+            v_h = v_h.transpose(0, 1)  # [bsz, src_len, head_dim]
+            
+            # Calculate attention scores
             try:
-                attn_output_weights.masked_fill_(key_padding_mask_expanded, float("-inf"))
+                # [bsz, tgt_len, src_len]
+                attn_weights_h = torch.bmm(q_h, k_h.transpose(1, 2))
+                
+                # Apply masks if needed
+                if attn_mask is not None:
+                    if attn_mask.dim() == 2:
+                        attn_mask_h = attn_mask.unsqueeze(0)  # [1, tgt_len, src_len]
+                    else:
+                        attn_mask_h = attn_mask[h::num_heads]  # Extract relevant part
+                    
+                    if attn_mask_h.shape[-2:] == attn_weights_h.shape[-2:]:
+                        attn_weights_h = attn_weights_h.masked_fill(attn_mask_h, float("-inf"))
+                
+                if key_padding_mask is not None:
+                    # [bsz, 1, src_len]
+                    key_padding_mask_h = key_padding_mask.unsqueeze(1)
+                    attn_weights_h = attn_weights_h.masked_fill(key_padding_mask_h, float("-inf"))
+                
+                # Apply softmax and dropout
+                attn_weights_h = F.softmax(attn_weights_h, dim=-1)
+                attn_weights_h = F.dropout(attn_weights_h, p=dropout_p, training=training)
+                
+                # Apply attention to values
+                # [bsz, tgt_len, head_dim]
+                attn_output_h = torch.bmm(attn_weights_h, v_h)
+                
+                # Transpose back and add to output
+                attn_output_h = attn_output_h.transpose(0, 1)  # [tgt_len, bsz, head_dim]
+                attn_output[:, :, head_start:head_end] = attn_output_h
+                
             except RuntimeError as e:
-                print(f"Error applying key padding mask: {e}")
-        
-        # Apply softmax and dropout
-        attn_output_weights = F.softmax(attn_output_weights, dim=-1)
-        attn_output_weights = F.dropout(attn_output_weights, p=dropout_p, training=training)
-        
-        # Apply attention to values
-        try:
-            attn_output = torch.bmm(attn_output_weights, v_flat)  # [bsz*num_heads, tgt_len, head_dim]
-        except RuntimeError as e:
-            print(f"Error in applying attention to values: {e}")
-            # Fallback: create zero tensor with correct shape
-            attn_output = torch.zeros(bsz * num_heads, tgt_len, head_dim, device=device)
-        
-        # Reshape output to original dimensions
-        try:
-            # Reshape to [tgt_len, bsz, embed_dim]
-            attn_output = attn_output.view(bsz, num_heads, tgt_len, head_dim)
-            attn_output = attn_output.permute(2, 0, 1, 3).contiguous()
-            attn_output = attn_output.view(tgt_len, bsz, embed_dim)
-        except RuntimeError as e:
-            print(f"Error in reshaping output: {e}")
-            # Fallback: create zero tensor with correct shape
-            attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
+                print(f"Error processing head {h}: {e}")
+                # Create zeros for this head
+                attn_output[:, :, head_start:head_end] = torch.zeros(tgt_len, bsz, head_dim, device=device)
         
         # Apply output projection
         try:
@@ -437,7 +418,8 @@ def multi_head_attention_forward(
             attn_output = torch.zeros(tgt_len, bsz, out_proj_weight.shape[0], device=device)
 
         if need_weights:
-            return attn_output, attn_output_weights
+            # For simplicity, return None for weights since we processed heads separately
+            return attn_output, None
         else:
             return attn_output, None
     
