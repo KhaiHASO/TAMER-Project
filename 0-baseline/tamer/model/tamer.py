@@ -61,10 +61,23 @@ class TAMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
+        # Ensure all inputs are on the same device
+        device = self.device
+        img = img.to(device)
+        img_mask = img_mask.to(device)
+        tgt = tgt.to(device)
+        
+        # Process through encoder
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
+        
+        # Duplicate for bi-directional processing
         feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
         mask = torch.cat((mask, mask), dim=0)
-
+        
+        # Ensure all tensors are on the correct device
+        feature = feature.to(device)
+        mask = mask.to(device)
+        
         return self.decoder(feature, mask, tgt)
 
     def beam_search(
@@ -93,7 +106,25 @@ class TAMER(pl.LightningModule):
         -------
         List[Hypothesis]
         """
+        # Ensure img and img_mask are on the same device as the model
+        device = self.device
+        img = img.to(device)
+        img_mask = img_mask.to(device)
+        
+        # Process the image through the encoder
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
+        
+        # Ensure feature and mask are on the correct device
+        feature = feature.to(device)
+        mask = mask.to(device)
+        
+        # For bi-directional beam search, we need to duplicate the batch
+        # This is because we'll run beam search for both left-to-right and right-to-left
+        batch_size = feature.shape[0]
+        feature_duplicated = torch.cat([feature, feature], dim=0)  # [2b, t, d]
+        mask_duplicated = torch.cat([mask, mask], dim=0)  # [2b, t]
+        
+        # Now run beam search with the duplicated batch
         return self.decoder.beam_search(
-            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature
+            [feature_duplicated], [mask_duplicated], beam_size, max_len, alpha, early_stopping, temperature
         )

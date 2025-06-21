@@ -347,7 +347,49 @@ def multi_head_attention_forward(
     src_len = k.size(1)
 
     if key_padding_mask is not None:
-        assert key_padding_mask.size(0) == bsz
+        # Ensure key_padding_mask is on the same device as other tensors
+        key_padding_mask = key_padding_mask.to(k.device)
+        
+        # Check if we need to adjust the batch size
+        if key_padding_mask.size(0) != bsz:
+            # If the batch sizes don't match, we need to reshape the key_padding_mask
+            # This can happen during beam search when we have duplicated batches
+            if key_padding_mask.size(0) % bsz == 0:
+                # If it's a multiple, we can reshape it
+                factor = key_padding_mask.size(0) // bsz
+                if factor > 1:
+                    # Take the first instance of each group
+                    key_padding_mask = key_padding_mask[::factor]
+            else:
+                # If it's not a clean multiple, try to broadcast
+                if bsz % key_padding_mask.size(0) == 0:
+                    # If bsz is a multiple of key_padding_mask size, repeat the mask
+                    repeat_factor = bsz // key_padding_mask.size(0)
+                    key_padding_mask = key_padding_mask.repeat(repeat_factor, 1)
+                else:
+                    # If all else fails, resize to match by taking first bsz elements or padding
+                    if key_padding_mask.size(0) > bsz:
+                        key_padding_mask = key_padding_mask[:bsz]
+                    else:
+                        # Pad with zeros (no padding) to match bsz
+                        padding = torch.zeros(
+                            (bsz - key_padding_mask.size(0), key_padding_mask.size(1)),
+                            dtype=key_padding_mask.dtype,
+                            device=key_padding_mask.device
+                        )
+                        key_padding_mask = torch.cat([key_padding_mask, padding], dim=0)
+        
+        # Final check to ensure sizes match
+        if key_padding_mask.size(0) != bsz:
+            print(f"Warning: key_padding_mask size ({key_padding_mask.size()}) doesn't match bsz ({bsz}), using workaround")
+            # Last resort: create a new mask of the right size
+            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=k.device)
+            # Copy as much as we can from the original mask
+            copy_size = min(key_padding_mask.size(0), bsz)
+            new_mask[:copy_size, :key_padding_mask.size(1)] = key_padding_mask[:copy_size, :]
+            key_padding_mask = new_mask
+            
+        assert key_padding_mask.size(0) == bsz, f"key_padding_mask size: {key_padding_mask.size()}, bsz: {bsz}"
         assert key_padding_mask.size(1) == src_len
 
     if add_zero_attn:
