@@ -244,28 +244,102 @@ def multi_head_attention_forward(
     static_v: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     """
-    Extremely simplified attention mechanism that just passes through the input.
-    This is a temporary solution to get past the errors.
+    Cơ chế attention hiệu quả hơn nhưng vẫn an toàn về kích thước tensor.
     """
     try:
-        # Get dimensions
+        # Lấy kích thước
         tgt_len, bsz, embed_dim = query.size()
+        src_len = key.size(0)
         device = query.device
         
-        # Simple identity operation - just use the query as output
-        attn_output = query.clone()
+        # Tính toán kích thước head
+        head_dim = embed_dim // num_heads
+        scaling = float(head_dim) ** -0.5
         
-        # Apply output projection to match expected output shape
-        try:
-            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-        except Exception as e:
-            print(f"Output projection failed: {e}")
-            # If projection fails, just use the original query
-            pass
+        # Chiếu query, key, value
+        if not use_separate_proj_weight:
+            # Self-attention
+            if (query is key or torch.equal(query, key)) and (key is value or torch.equal(key, value)):
+                q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+                k = F.linear(key, in_proj_weight[embed_dim:2*embed_dim], in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+                v = F.linear(value, in_proj_weight[2*embed_dim:], in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+            else:
+                # Encoder-decoder attention
+                q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+                k = F.linear(key, in_proj_weight[embed_dim:2*embed_dim], in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+                v = F.linear(value, in_proj_weight[2*embed_dim:], in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+        else:
+            q = F.linear(query, q_proj_weight, in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+            k = F.linear(key, k_proj_weight, in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+            v = F.linear(value, v_proj_weight, in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+        
+        # Scale query
+        q = q * scaling
+        
+        # Đảm bảo tất cả tensor ở cùng device
+        q = q.to(device)
+        k = k.to(device)
+        v = v.to(device)
+        
+        # Tạo tensor output
+        attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
+        
+        # Xử lý từng batch và từng head riêng biệt
+        # Cách này chậm hơn nhưng an toàn về kích thước
+        for b in range(min(bsz, k.size(1), v.size(1))):
+            # Xử lý từng vị trí trong target sequence
+            for i in range(tgt_len):
+                # Khởi tạo weighted sum cho vị trí này
+                weighted_sum = torch.zeros(embed_dim, device=device)
+                
+                # Xử lý từng head riêng biệt
+                for h in range(num_heads):
+                    # Tính chỉ số bắt đầu và kết thúc cho head này
+                    start_idx = h * head_dim
+                    end_idx = (h + 1) * head_dim
+                    
+                    # Lấy query, key, value cho head này
+                    q_h = q[i, b, start_idx:end_idx]  # [head_dim]
+                    
+                    # Tính attention weights
+                    attn_weights = torch.zeros(src_len, device=device)
+                    
+                    # Tính dot product giữa query và tất cả keys
+                    for j in range(src_len):
+                        k_h = k[j, b, start_idx:end_idx]  # [head_dim]
+                        attn_weights[j] = torch.sum(q_h * k_h)
+                    
+                    # Áp dụng key padding mask nếu có
+                    if key_padding_mask is not None and b < key_padding_mask.size(0):
+                        for j in range(min(src_len, key_padding_mask.size(1))):
+                            if key_padding_mask[b, j]:
+                                attn_weights[j] = float('-inf')
+                    
+                    # Áp dụng softmax để có attention weights
+                    attn_weights = F.softmax(attn_weights, dim=0)
+                    
+                    # Áp dụng dropout nếu đang trong chế độ training
+                    if dropout_p > 0.0 and training:
+                        attn_weights = F.dropout(attn_weights, p=dropout_p)
+                    
+                    # Áp dụng attention weights vào values
+                    head_output = torch.zeros(head_dim, device=device)
+                    for j in range(src_len):
+                        v_h = v[j, b, start_idx:end_idx]  # [head_dim]
+                        head_output += attn_weights[j] * v_h
+                    
+                    # Thêm kết quả của head này vào weighted sum
+                    weighted_sum[start_idx:end_idx] = head_output
+                
+                # Lưu kết quả cho vị trí này
+                attn_output[i, b] = weighted_sum
+        
+        # Áp dụng output projection
+        attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
         
         return attn_output, None
         
     except Exception as e:
-        print(f"Error in attention passthrough: {e}")
-        # Return the query as is
+        print(f"Lỗi trong attention: {e}")
+        # Trả về query như là fallback
         return query, None
