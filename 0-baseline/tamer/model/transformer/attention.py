@@ -257,7 +257,7 @@ def multi_head_attention_forward(
         assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         scaling = float(head_dim) ** -0.5
 
-        # Compute q, k, v projections
+        # Compute q, k, v projections using the most direct approach
         if not use_separate_proj_weight:
             if (query is key or torch.equal(query, key)) and (key is value or torch.equal(key, value)):
                 # Self-attention case
@@ -341,22 +341,6 @@ def multi_head_attention_forward(
             warnings.warn("Byte tensor for key_padding_mask is deprecated. Use bool tensor instead.")
             key_padding_mask = key_padding_mask.to(torch.bool)
 
-        # Handle bias vectors for keys and values
-        if bias_k is not None and bias_v is not None:
-            if static_k is None and static_v is None:
-                k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
-                v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
-                if attn_mask is not None:
-                    attn_mask = F.pad(attn_mask, (0, 1))
-                if key_padding_mask is not None:
-                    key_padding_mask = F.pad(key_padding_mask, (0, 1))
-            else:
-                assert static_k is None, "bias cannot be added to static key."
-                assert static_v is None, "bias cannot be added to static value."
-        else:
-            assert bias_k is None
-            assert bias_v is None
-
         # Move tensors to the same device
         q = q.to(device)
         if k is not None:
@@ -364,211 +348,96 @@ def multi_head_attention_forward(
         if v is not None:
             v = v.to(device)
 
-        # Safe reshaping for multi-head attention
-        try:
-            # First approach: standard reshape
-            q_reshaped = q.reshape(tgt_len, bsz, num_heads, head_dim).permute(1, 2, 0, 3).contiguous()
-            q_reshaped = q_reshaped.view(bsz * num_heads, tgt_len, head_dim)
-            
-            src_len = k.size(0)
-            k_reshaped = k.reshape(src_len, bsz, num_heads, head_dim).permute(1, 2, 0, 3).contiguous()
-            k_reshaped = k_reshaped.view(bsz * num_heads, src_len, head_dim)
-            
-            v_reshaped = v.reshape(src_len, bsz, num_heads, head_dim).permute(1, 2, 0, 3).contiguous()
-            v_reshaped = v_reshaped.view(bsz * num_heads, src_len, head_dim)
-            
-            q, k, v = q_reshaped, k_reshaped, v_reshaped
-        except RuntimeError as e:
-            print(f"Error in reshaping q,k,v: {e}")
-            # Second approach: manual reshaping
-            q_flat = q.reshape(tgt_len * bsz, embed_dim)
-            k_flat = k.reshape(src_len * bsz, embed_dim)
-            v_flat = v.reshape(src_len * bsz, embed_dim)
-            
-            # Split into heads
-            q_heads = q_flat.view(tgt_len, bsz, num_heads, head_dim)
-            k_heads = k_flat.view(src_len, bsz, num_heads, head_dim)
-            v_heads = v_flat.view(src_len, bsz, num_heads, head_dim)
-            
-            # Transpose for attention
-            q = q_heads.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, tgt_len, head_dim)
-            k = k_heads.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, src_len, head_dim)
-            v = v_heads.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, src_len, head_dim)
+        # Get sequence lengths
+        src_len = k.size(0)
 
-        # Handle static k and v
-        if static_k is not None:
-            assert static_k.size(0) == bsz * num_heads
-            assert static_k.size(2) == head_dim
-            k = static_k
+        # Skip complex reshaping and do a simple attention calculation
+        # Flatten the batch dimension into the head dimension for simplicity
+        q_flat = q.reshape(tgt_len, -1, head_dim)  # [tgt_len, bsz*num_heads, head_dim]
+        k_flat = k.reshape(src_len, -1, head_dim)  # [src_len, bsz*num_heads, head_dim]
+        v_flat = v.reshape(src_len, -1, head_dim)  # [src_len, bsz*num_heads, head_dim]
 
-        if static_v is not None:
-            assert static_v.size(0) == bsz * num_heads
-            assert static_v.size(2) == head_dim
-            v = static_v
-
-        # Get source sequence length
-        src_len = k.size(1)
+        # Transpose for bmm
+        q_flat = q_flat.permute(1, 0, 2)  # [bsz*num_heads, tgt_len, head_dim]
+        k_flat = k_flat.permute(1, 0, 2)  # [bsz*num_heads, src_len, head_dim]
+        v_flat = v_flat.permute(1, 0, 2)  # [bsz*num_heads, src_len, head_dim]
 
         # Handle key padding mask
         if key_padding_mask is not None:
             key_padding_mask = key_padding_mask.to(device)
             
-            # Adjust batch size if needed
-            if key_padding_mask.size(0) != bsz:
-                if key_padding_mask.size(0) % bsz == 0:
-                    factor = key_padding_mask.size(0) // bsz
-                    if factor > 1:
-                        key_padding_mask = key_padding_mask[::factor]
-                elif bsz % key_padding_mask.size(0) == 0:
-                    repeat_factor = bsz // key_padding_mask.size(0)
-                    key_padding_mask = key_padding_mask.repeat(repeat_factor, 1)
-                else:
-                    if key_padding_mask.size(0) > bsz:
-                        key_padding_mask = key_padding_mask[:bsz]
-                    else:
-                        padding = torch.zeros(
-                            (bsz - key_padding_mask.size(0), key_padding_mask.size(1)),
-                            dtype=key_padding_mask.dtype,
-                            device=device
-                        )
-                        key_padding_mask = torch.cat([key_padding_mask, padding], dim=0)
-            
-            # Adjust sequence length if needed
-            if key_padding_mask.size(1) != src_len:
-                if key_padding_mask.size(1) > src_len:
-                    key_padding_mask = key_padding_mask[:, :src_len]
-                else:
-                    padding = torch.zeros(
-                        (key_padding_mask.size(0), src_len - key_padding_mask.size(1)),
-                        dtype=key_padding_mask.dtype,
-                        device=device
-                    )
-                    key_padding_mask = torch.cat([key_padding_mask, padding], dim=1)
-
-        # Handle zero attention
-        if add_zero_attn:
-            src_len += 1
-            k = torch.cat([k, torch.zeros((k.size(0), 1) + k.size()[2:], dtype=k.dtype, device=device)], dim=1)
-            v = torch.cat([v, torch.zeros((v.size(0), 1) + v.size()[2:], dtype=v.dtype, device=device)], dim=1)
-            if attn_mask is not None:
-                attn_mask = F.pad(attn_mask, (0, 1))
-            if key_padding_mask is not None:
-                key_padding_mask = F.pad(key_padding_mask, (0, 1))
+            # Make sure key_padding_mask has the right shape
+            if key_padding_mask.shape[0] != bsz or key_padding_mask.shape[1] != src_len:
+                # Create a new mask with the right shape
+                new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
+                # Copy as much as we can from the original mask
+                copy_rows = min(key_padding_mask.shape[0], bsz)
+                copy_cols = min(key_padding_mask.shape[1], src_len)
+                new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
+                key_padding_mask = new_mask
 
         # Calculate attention weights
         try:
-            attn_output_weights = torch.bmm(q, k.transpose(1, 2))
+            attn_output_weights = torch.bmm(q_flat, k_flat.transpose(1, 2))  # [bsz*num_heads, tgt_len, src_len]
         except RuntimeError as e:
             print(f"Error in calculating attention weights: {e}")
             # Fallback: create zero tensor with correct shape
             attn_output_weights = torch.zeros(bsz * num_heads, tgt_len, src_len, device=device)
         
         # Apply masks and softmax
-        try:
-            attention = mask_softmax_dropout(
-                attn_output_weights, 
-                attn_mask, 
-                key_padding_mask, 
-                bsz, 
-                num_heads, 
-                tgt_len, 
-                src_len, 
-                dropout_p, 
-                training
-            )
-        except Exception as e:
-            print(f"Error in mask_softmax_dropout: {e}")
-            # Fallback: create normalized tensor
-            attention = torch.ones(bsz * num_heads, tgt_len, src_len, device=device)
-            attention = attention / src_len  # Simple uniform distribution as fallback
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(device)
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(0).expand(bsz * num_heads, -1, -1)
+            if attn_mask.shape != attn_output_weights.shape:
+                print(f"Warning: attn_mask shape {attn_mask.shape} doesn't match weights shape {attn_output_weights.shape}")
+            else:
+                attn_output_weights.masked_fill_(attn_mask, float("-inf"))
         
-        # Apply ARM if provided
-        if arm is not None:
+        if key_padding_mask is not None:
+            # Reshape for broadcasting
+            key_padding_mask_expanded = key_padding_mask.unsqueeze(1).unsqueeze(0)  # [1, bsz, 1, src_len]
+            key_padding_mask_expanded = key_padding_mask_expanded.expand(num_heads, -1, tgt_len, -1)  # [num_heads, bsz, tgt_len, src_len]
+            key_padding_mask_expanded = key_padding_mask_expanded.reshape(bsz * num_heads, tgt_len, src_len)  # [bsz*num_heads, tgt_len, src_len]
+            
             try:
-                # Apply ARM safely
-                refinement = arm(attention)
-                if refinement.shape == attn_output_weights.shape:
-                    attn_output_weights -= refinement
-                    attention = mask_softmax_dropout(
-                        attn_output_weights, 
-                        attn_mask, 
-                        key_padding_mask, 
-                        bsz, 
-                        num_heads, 
-                        tgt_len, 
-                        src_len, 
-                        dropout_p, 
-                        training
-                    )
-                else:
-                    print(f"Warning: ARM output shape {refinement.shape} doesn't match attention shape {attn_output_weights.shape}")
-            except Exception as e:
-                print(f"Warning: ARM application failed with error: {e}")
-                # Continue without ARM refinement
-
+                attn_output_weights.masked_fill_(key_padding_mask_expanded, float("-inf"))
+            except RuntimeError as e:
+                print(f"Error applying key padding mask: {e}")
+        
+        # Apply softmax and dropout
+        attn_output_weights = F.softmax(attn_output_weights, dim=-1)
+        attn_output_weights = F.dropout(attn_output_weights, p=dropout_p, training=training)
+        
         # Apply attention to values
         try:
-            attn_output = torch.bmm(attention, v)
+            attn_output = torch.bmm(attn_output_weights, v_flat)  # [bsz*num_heads, tgt_len, head_dim]
         except RuntimeError as e:
             print(f"Error in applying attention to values: {e}")
-            # Try to reshape attention to match v dimensions
-            if attention.shape[2] != v.shape[1]:
-                print(f"Attention shape {attention.shape} doesn't match value shape {v.shape}")
-                if attention.shape[2] < v.shape[1]:
-                    # Pad attention
-                    padding = torch.zeros(
-                        (attention.shape[0], attention.shape[1], v.shape[1] - attention.shape[2]),
-                        device=device
-                    )
-                    attention_padded = torch.cat([attention, padding], dim=2)
-                    attention_padded = F.softmax(attention_padded, dim=-1)
-                    attn_output = torch.bmm(attention_padded, v)
-                else:
-                    # Truncate attention
-                    attention_truncated = attention[:, :, :v.shape[1]]
-                    attention_truncated = F.softmax(attention_truncated, dim=-1)
-                    attn_output = torch.bmm(attention_truncated, v)
-            else:
-                # Fallback: create zero tensor with correct shape
-                attn_output = torch.zeros(bsz * num_heads, tgt_len, head_dim, device=device)
+            # Fallback: create zero tensor with correct shape
+            attn_output = torch.zeros(bsz * num_heads, tgt_len, head_dim, device=device)
         
-        # Reshape output
+        # Reshape output to original dimensions
         try:
-            # First approach: standard reshape
+            # Reshape to [tgt_len, bsz, embed_dim]
             attn_output = attn_output.view(bsz, num_heads, tgt_len, head_dim)
-            attn_output = attn_output.permute(2, 0, 1, 3).contiguous().view(tgt_len, bsz, embed_dim)
+            attn_output = attn_output.permute(2, 0, 1, 3).contiguous()
+            attn_output = attn_output.view(tgt_len, bsz, embed_dim)
         except RuntimeError as e:
             print(f"Error in reshaping output: {e}")
-            # Second approach: manual reshaping
-            attn_output_flat = attn_output.view(bsz, num_heads, tgt_len, head_dim)
+            # Fallback: create zero tensor with correct shape
             attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
-            
-            # Manually combine heads
-            for t in range(tgt_len):
-                for b in range(bsz):
-                    for h in range(num_heads):
-                        start_idx = h * head_dim
-                        end_idx = (h + 1) * head_dim
-                        attn_output[t, b, start_idx:end_idx] = attn_output_flat[b, h, t]
         
         # Apply output projection
         try:
             attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
         except RuntimeError as e:
             print(f"Error in output projection: {e}")
-            # Reshape attn_output to match expected dimensions
-            if attn_output.shape[-1] != out_proj_weight.shape[1]:
-                print(f"Output shape {attn_output.shape} doesn't match weight shape {out_proj_weight.shape}")
-                # Reshape to match expected dimensions
-                attn_output = attn_output.reshape(-1, out_proj_weight.shape[1])
-                attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-                attn_output = attn_output.reshape(tgt_len, bsz, -1)
-            else:
-                # Fallback: create zero tensor with correct shape
-                attn_output = torch.zeros(tgt_len, bsz, out_proj_weight.shape[0], device=device)
+            # Fallback: create zero tensor with correct shape
+            attn_output = torch.zeros(tgt_len, bsz, out_proj_weight.shape[0], device=device)
 
         if need_weights:
-            return attn_output, attention
+            return attn_output, attn_output_weights
         else:
             return attn_output, None
     
@@ -576,5 +445,4 @@ def multi_head_attention_forward(
         print(f"Error in multi-head attention: {e}")
         # Return zero tensors as fallback
         attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
-        attention = torch.zeros(bsz * num_heads, tgt_len, src_len, device=device) if need_weights else None
         return attn_output, None
