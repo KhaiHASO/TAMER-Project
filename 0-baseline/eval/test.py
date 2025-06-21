@@ -1,7 +1,8 @@
 import os
 import json
 import typer
-from lightning.pytorch import Trainer, seed_everything
+from pytorch_lightning import Trainer, seed_everything
+
 from tamer.datamodule import HMEDatamodule
 from tamer.lit_tamer import LitTAMER
 
@@ -19,7 +20,7 @@ def main(
     ckp_path = os.path.join(ckp_folder, fnames[0])
     print(f"Test with fname: {fnames[0]}")
 
-    trainer = Trainer(logger=False, gpus=1)
+    trainer = Trainer(logger=False, accelerator="gpu", devices=1)
 
     dm = HMEDatamodule(
         folder=folder,

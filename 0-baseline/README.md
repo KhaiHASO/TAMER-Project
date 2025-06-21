@@ -12,31 +12,31 @@
 ```bash
 ├── config/         # config for TAMER hyperparameter
 ├── data/
-│   └── crohme      # CROHME Dataset
-│   └── HME100k      # HME100k Dataset which needs to be downloaded according to the instructions below.
+│   └── crohme      # CROHME Dataset
+│   └── HME100k      # HME100k Dataset which needs to be downloaded according to the instructions below.
 ├── eval/             # evaluation scripts
 ├── tamer               # model definition folder
 ├── lightning_logs      # training logs
-│   └── version_0      # ckpt(w/o fusion) for CROHME dataset 
-│       ├── checkpoints
-│       │   └── epoch=315-step=118815-val_ExpRate=0.6113.ckpt
-│       ├── config.yaml
-│       └── hparams.yaml
-│   └── version_1      # ckpt(w/o fusion) for HME100K dataset 
-│       ├── checkpoints
-│       │   └── epoch=51-step=162967-val_ExpRate=0.6851.ckpt
-│       ├── config.yaml
-│       └── hparams.yaml
-│   └── version_2      # ckpt(w/ fusion) for CROHME dataset 
-│       ├── checkpoints
-│       │   └── 
-│       ├── config.yaml
-│       └── hparams.yaml
-│   └── version_3      # ckpt(w/ fusion) for HME100K dataset 
-│       ├── checkpoints
-│       │   └── epoch=55-step=175503-val_ExpRate=0.6954.ckpt
-│       ├── config.yaml
-│       └── hparams.yaml
+│   └── version_0      # ckpt(w/o fusion) for CROHME dataset 
+│       ├── checkpoints
+│       │   └── epoch=315-step=118815-val_ExpRate=0.6113.ckpt
+│       ├── config.yaml
+│       └── hparams.yaml
+│   └── version_1      # ckpt(w/o fusion) for HME100K dataset 
+│       ├── checkpoints
+│       │   └── epoch=51-step=162967-val_ExpRate=0.6851.ckpt
+│       ├── config.yaml
+│       └── hparams.yaml
+│   └── version_2      # ckpt(w/ fusion) for CROHME dataset 
+│       ├── checkpoints
+│       │   └── 
+│       ├── config.yaml
+│       └── hparams.yaml
+│   └── version_3      # ckpt(w/ fusion) for HME100K dataset 
+│       ├── checkpoints
+│       │   └── epoch=55-step=175503-val_ExpRate=0.6954.ckpt
+│       ├── config.yaml
+│       └── hparams.yaml
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
@@ -48,20 +48,19 @@
 ```bash
 cd TAMER
 # install project   
-conda create -y -n TAMER python=3.7
+conda create -y -n TAMER python=3.11
 conda activate TAMER
-conda install pytorch=1.8.1 torchvision=0.2.2 cudatoolkit=11.1 pillow=8.4.0 -c pytorch -c nvidia
-# training dependency
-conda install pytorch-lightning=1.4.9 torchmetrics=0.6.0 -c conda-forge
-# evaluating dependency
-conda install pandoc=1.19.2.1 -c conda-forge
+# Install PyTorch ecosystem
+pip install torch==2.1.2 torchvision==0.16.2
+# Install Lightning and other dependencies
+pip install -r requirements.txt
 pip install -e .
  ```
 ## Dataset Preparation
 We have prepared the CROHME dataset and HME100K dataset in [download link](https://disk.pku.edu.cn/link/AAF10CCC4D539543F68847A9010C607139). After downloading, please extract it to the `data/` folder.
 
 ## Training on CROHME Dataset
-Next, navigate to TAMER folder and run `train.py`. It may take **8~9** hours on **4** NVIDIA 2080Ti gpus using ddp.
+Next, navigate to TAMER folder and run `train.py`. It may take **8~9** hours on **4** NVIDIA GPUs using ddp.
 ```bash
 # train TAMER model using 4 gpus and ddp on CROHME dataset
 python -u train.py --config config/crohme.yaml
@@ -69,11 +68,11 @@ python -u train.py --config config/crohme.yaml
 
 For single gpu user, you may change the `config.yaml` file to
 ```yaml
-gpus: 1
+devices: 1
 ```
 
 ## Training on HME100k Dataset
-It may take about **48** hours on **4** NVIDIA 2080Ti gpus using ddp on HME100k dataset.
+It may take about **48** hours on **4** NVIDIA GPUs using ddp on HME100k dataset.
 ```bash
 # train TAMER model using 4 gpus and ddp on hme100k dataset
 python -u train.py --config config/hme100k.yaml

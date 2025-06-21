@@ -48,24 +48,14 @@ class ExpRateRecorder(Metric):
         self.add_state("rec", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
     def update(self, indices_hat: List[List[int]], indices: List[List[int]]):
-        print("DEBUG: ExpRateRecorder.update được gọi")
-        print(f"DEBUG: Số dự đoán: {len(indices_hat)}, Số ground truth: {len(indices)}")
-        
-        for idx, (pred, truth) in enumerate(zip(indices_hat, indices)):
-            pred_label = vocab.indices2label(pred)
-            truth_label = vocab.indices2label(truth)
-            
-            # Debug thông tin chi tiết
-            print(f"DEBUG: Sample {idx}:")
-            print(f"DEBUG: Pred label: '{pred_label}'")
-            print(f"DEBUG: Truth label: '{truth_label}'")
+        for pred, truth in zip(indices_hat, indices):
+            pred = vocab.indices2label(pred)
+            truth = vocab.indices2label(truth)
 
-            is_same = pred_label == truth_label
-            print(f"DEBUG: Match: {is_same}")
+            is_same = pred == truth
 
             if is_same:
                 self.rec += 1
-                print(f"DEBUG: Matches so far: {self.rec}")
 
             self.total_line += 1
 
@@ -73,7 +63,6 @@ class ExpRateRecorder(Metric):
         if self.total_line < 1:
             self.total_line = 1
         exp_rate = self.rec / self.total_line
-        print(f"DEBUG: Final ExpRate: {exp_rate} ({self.rec}/{self.total_line})")
         return exp_rate
 
 

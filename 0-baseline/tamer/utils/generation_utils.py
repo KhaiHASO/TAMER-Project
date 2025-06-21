@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import List, Tuple
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 from tamer.datamodule import vocab
@@ -66,7 +66,6 @@ class DecodeModel(pl.LightningModule):
         -------
         List[Hypothesis]: [batch_size,]
         """
-        print("DEBUG: Starting beam search with beam_size:", beam_size, "max_len:", max_len)
         batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
         batch_beam_size = batch_size * beam_size
         half_bb_size = batch_beam_size // 2
@@ -89,7 +88,6 @@ class DecodeModel(pl.LightningModule):
             device=self.device,
         )
         input_ids = torch.cat((l2r, r2l), dim=0)
-        print(f"DEBUG: Initial input_ids shape: {input_ids.shape}, values: {input_ids}")
 
         beam_scorer = BeamSearchScorer(
             batch_size, beam_size, alpha, early_stopping, self.device
@@ -105,17 +103,6 @@ class DecodeModel(pl.LightningModule):
             max_len=max_len,
             temperature=temperature,
         )
-        
-        print(f"DEBUG: After beam search, got {len(hyps)} hypotheses")
-        for i, (h, s) in enumerate(zip(hyps[:5], scores[:5])):  # Chỉ hiện 5 đầu tiên để tránh quá nhiều output
-            # Chuyển h thành danh sách Python nếu là tensor
-            h_list = h.tolist() if hasattr(h, 'tolist') else h
-            print(f"DEBUG: Hyp {i}: score={s}, tokens={h}")
-            if len(h_list) > 0:
-                try:
-                    print(f"DEBUG: Hyp {i} words: {vocab.indices2words(h_list)}")
-                except Exception as e:
-                    print(f"DEBUG: Error converting tokens to words: {e}")
 
         # reverse half last
         for i in range(half_bb_size, batch_beam_size):
@@ -172,20 +159,10 @@ class DecodeModel(pl.LightningModule):
             best_split * half_bb_size + batch_indices * beam_size + best_indices
         )
 
-        print("DEBUG: Final best indices:", best_indices)
-        print("DEBUG: Final best scores:", best_scores)
-
         ret: List[Hypothesis] = []
         for idx, score in zip(best_indices, best_scores):
             hpy = Hypothesis(hyps[idx], score, "l2r")
             ret.append(hpy)
-            
-        print("DEBUG: Final return hypotheses:")
-        for i, h in enumerate(ret):
-            print(f"DEBUG: Return {i}: score={h.score}, seq={h.seq}")
-            if h.seq:
-                print(f"DEBUG: Return {i} words: {vocab.indices2words(h.seq)}")
-                
         return ret
 
     def _beam_search(
@@ -218,20 +195,11 @@ class DecodeModel(pl.LightningModule):
             FloatTensor: [b * beam_size] corresponding scores
         """
         batch_size, cur_len = input_ids.shape
-        print(f"DEBUG: _beam_search - input_ids shape: {input_ids.shape}")
 
         beam_scores = torch.zeros(
             batch_size, dtype=torch.float, device=self.device)
 
-        # Kiểm tra độ dài tối đa để đảm bảo không quá dài
-        max_len = min(max_len, 200)  # Giới hạn tối đa là 200 token
-        
-        # Biến để theo dõi số bước không cải thiện
-        no_improvement_steps = 0
-        last_best_score = float('-inf')
-
         while cur_len < max_len and not beam_scorer.is_done():
-            print(f"DEBUG: Beam search step {cur_len}/{max_len}")
             next_token_logits = (
                 self.transform(src, src_mask, input_ids)[0][
                     :, -1, :] / temperature
@@ -254,18 +222,6 @@ class DecodeModel(pl.LightningModule):
             next_token_scores, next_tokens = torch.topk(
                 next_token_scores, 2 * beam_size, dim=1
             )
-            
-            if cur_len == 1:  # Show first step in detail
-                print(f"DEBUG: First step token scores: {next_token_scores}")
-                print(f"DEBUG: First step tokens: {next_tokens}")
-                top_tokens = next_tokens % len(vocab)
-                for i in range(min(5, batch_size)):  # Show first few batches
-                    print(f"DEBUG: Batch {i} top tokens: {top_tokens[i][:5]}")
-                    try:
-                        words = [vocab.indices2words([t.item()])[0] for t in top_tokens[i][:5]]
-                        print(f"DEBUG: Batch {i} top words: {words}")
-                    except Exception as e:
-                        print(f"DEBUG: Error converting tokens to words: {e}")
 
             next_indices = next_tokens // len(vocab)
             next_tokens = next_tokens % len(vocab)
@@ -276,7 +232,6 @@ class DecodeModel(pl.LightningModule):
                     src[i] = repeat(src[i], "b ... -> (b m) ...", m=beam_size)
                     src_mask[i] = repeat(
                         src_mask[i], "b ... -> (b m) ...", m=beam_size)
-                print(f"DEBUG: After expansion, input_ids shape: {input_ids.shape}")
 
             beam_scores, beam_next_tokens, beam_idx = beam_scorer.process(
                 input_ids=input_ids,
@@ -288,35 +243,10 @@ class DecodeModel(pl.LightningModule):
             input_ids = torch.cat(
                 (input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)), dim=-1
             )
-            
-            if cur_len <= 3 or cur_len % 5 == 0:  # Show every 5 steps after the first 3
-                print(f"DEBUG: Step {cur_len} - input_ids shape: {input_ids.shape}")
-                # Show some examples of current sequences
-                for i in range(min(3, input_ids.shape[0])):
-                    seq = input_ids[i].tolist()
-                    print(f"DEBUG: Sequence {i} (len {len(seq)}): {seq}")
-                    try:
-                        words = vocab.indices2words(seq)
-                        print(f"DEBUG: Words {i}: {words}")
-                    except Exception as e:
-                        print(f"DEBUG: Error converting seq {i} to words: {e}")
-            
-            # Kiểm tra xem có cải thiện không
-            current_best_score = beam_scores.max().item()
-            if current_best_score <= last_best_score:
-                no_improvement_steps += 1
-                if no_improvement_steps >= 10 and cur_len > 50:  # Nếu không cải thiện sau 10 bước và đã có ít nhất 50 token
-                    print(f"DEBUG: Stopping early at step {cur_len} due to no improvement")
-                    break
-            else:
-                no_improvement_steps = 0
-                last_best_score = current_best_score
 
             cur_len += 1
 
-        hyps, scores = beam_scorer.finalize(input_ids, beam_scores)
-        print(f"DEBUG: Finalized beam search with {len(hyps)} hypotheses")
-        return hyps, scores
+        return beam_scorer.finalize(input_ids, beam_scores)
 
     def _rate(
         self,

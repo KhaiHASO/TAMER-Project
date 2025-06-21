@@ -1,6 +1,22 @@
-!pip install -U 'jsonargparse[signatures]>=4.27.7'
-!pip install einops
-!pip install editdistance
-!pip install opencv-python
-!pip install torchvision
-!pip install lightning
+einops==0.7.0
+editdistance==0.6.2
+# for pytorch-lightning CLI
+jsonargparse[signatures]==4.27.1
+# pytorch ecosystem
+torch==2.1.2
+torchvision==0.16.2
+pytorch-lightning==2.1.3
+torchmetrics==1.2.1
+# dev-dependency
+flake8==6.1.0
+black==23.12.1
+isort==5.13.2
+jupyter==1.0.0
+opencv-python==4.8.1.78
+matplotlib==3.8.2
+# for test in crohme
+typer==0.9.0
+beautifulsoup4==4.12.2
+lxml>=4.9.3
+pillow==10.2.0
+pandas==2.1.4

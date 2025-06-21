@@ -1,6 +1,6 @@
 from typing import List
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 from torch import FloatTensor, LongTensor
 

@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 from einops import rearrange, repeat
 

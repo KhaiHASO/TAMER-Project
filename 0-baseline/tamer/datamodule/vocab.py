@@ -1,5 +1,4 @@
 from typing import Dict, List
-import torch
 
 
 class CROHMEVocab:
@@ -26,21 +25,7 @@ class CROHMEVocab:
         return [self.word2idx[w] for w in words]
 
     def indices2words(self, id_list: List[int]) -> List[str]:
-        result = []
-        for i in id_list:
-            # Xử lý tensor
-            if torch.is_tensor(i):
-                idx = i.item()
-            else:
-                idx = i
-            
-            # Đảm bảo idx là số nguyên hợp lệ trong từ điển
-            if idx in self.idx2word:
-                result.append(self.idx2word[idx])
-            else:
-                result.append(f"<unknown-{idx}>")
-                
-        return result
+        return [self.idx2word[i] for i in id_list]
 
     def indices2label(self, id_list: List[int]) -> str:
         words = self.indices2words(id_list)
