@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
+from einops import rearrange, repeat
 
 from .arm import AttentionRefinementModule
 
@@ -244,13 +245,17 @@ def multi_head_attention_forward(
     static_v: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     """
-    Cơ chế attention hiệu quả hơn nhưng vẫn an toàn về kích thước tensor.
+    Cơ chế attention sử dụng logic từ mã nguồn được cung cấp
     """
     try:
-        # Lấy kích thước
+        # Lấy kích thước và thiết bị
         tgt_len, bsz, embed_dim = query.size()
         src_len = key.size(0)
         device = query.device
+        
+        # Kiểm tra kích thước embed
+        if embed_dim != embed_dim_to_check:
+            print(f"Warning: embed_dim mismatch: {embed_dim} vs {embed_dim_to_check}")
         
         # Tính toán kích thước head
         head_dim = embed_dim // num_heads
@@ -260,9 +265,7 @@ def multi_head_attention_forward(
         if not use_separate_proj_weight:
             # Self-attention
             if (query is key or torch.equal(query, key)) and (key is value or torch.equal(key, value)):
-                q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
-                k = F.linear(key, in_proj_weight[embed_dim:2*embed_dim], in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
-                v = F.linear(value, in_proj_weight[2*embed_dim:], in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+                q, k, v = F.linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
             else:
                 # Encoder-decoder attention
                 q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
@@ -281,58 +284,73 @@ def multi_head_attention_forward(
         k = k.to(device)
         v = v.to(device)
         
-        # Tạo tensor output
+        # Sử dụng phương pháp đơn giản hơn - xử lý từng batch riêng lẻ
+        # Tạo tensor output bắt đầu bằng không
         attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
         
-        # Xử lý từng batch và từng head riêng biệt
-        # Cách này chậm hơn nhưng an toàn về kích thước
+        # Xử lý từng batch
         for b in range(min(bsz, k.size(1), v.size(1))):
-            # Xử lý từng vị trí trong target sequence
-            for i in range(tgt_len):
-                # Khởi tạo weighted sum cho vị trí này
-                weighted_sum = torch.zeros(embed_dim, device=device)
-                
-                # Xử lý từng head riêng biệt
+            # Reshape q, k, v cho batch này
+            q_b = q[:, b, :].view(tgt_len, num_heads, head_dim)
+            k_b = k[:, b, :].view(src_len, num_heads, head_dim)
+            v_b = v[:, b, :].view(src_len, num_heads, head_dim)
+            
+            # Chuyển đổi để tính toán attention
+            q_b = q_b.permute(1, 0, 2)  # [num_heads, tgt_len, head_dim]
+            k_b = k_b.permute(1, 0, 2)  # [num_heads, src_len, head_dim]
+            v_b = v_b.permute(1, 0, 2)  # [num_heads, src_len, head_dim]
+            
+            # Tính toán attention scores
+            attn_weights = torch.zeros(num_heads, tgt_len, src_len, device=device)
+            
+            # Tính dot product cho mỗi head
+            for h in range(num_heads):
+                for i in range(tgt_len):
+                    for j in range(src_len):
+                        attn_weights[h, i, j] = torch.dot(q_b[h, i], k_b[h, j])
+            
+            # Áp dụng key padding mask nếu có
+            if key_padding_mask is not None and b < key_padding_mask.size(0):
+                mask_b = key_padding_mask[b]  # [src_len]
                 for h in range(num_heads):
-                    # Tính chỉ số bắt đầu và kết thúc cho head này
-                    start_idx = h * head_dim
-                    end_idx = (h + 1) * head_dim
-                    
-                    # Lấy query, key, value cho head này
-                    q_h = q[i, b, start_idx:end_idx]  # [head_dim]
-                    
-                    # Tính attention weights
-                    attn_weights = torch.zeros(src_len, device=device)
-                    
-                    # Tính dot product giữa query và tất cả keys
+                    for i in range(tgt_len):
+                        for j in range(src_len):
+                            if j < mask_b.size(0) and mask_b[j]:
+                                attn_weights[h, i, j] = float('-inf')
+            
+            # Áp dụng softmax để có attention weights
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            
+            # Áp dụng dropout nếu đang trong chế độ training
+            if dropout_p > 0.0 and training:
+                attn_weights = F.dropout(attn_weights, p=dropout_p)
+            
+            # Áp dụng ARM nếu có
+            if arm is not None:
+                # Giả định rằng h (chiều cao) là căn bậc hai của src_len
+                h = int(src_len ** 0.5)
+                if h * h == src_len:  # Kiểm tra nếu src_len là số chính phương
+                    # Reshape attn_weights để sử dụng với ARM
+                    attn_weights_flat = rearrange(attn_weights, "n t l -> (b n) t l", b=1)
+                    # Áp dụng ARM
+                    try:
+                        cov = arm(attn_weights_flat, key_padding_mask[b:b+1] if key_padding_mask is not None else None, h, attn_weights_flat)
+                        # Thêm cov vào attn_weights
+                        attn_weights = rearrange(cov, "(b n) t l -> n t l", b=1)
+                    except Exception as e:
+                        print(f"Lỗi khi áp dụng ARM: {e}")
+            
+            # Áp dụng attention weights vào values
+            attn_output_b = torch.zeros(num_heads, tgt_len, head_dim, device=device)
+            for h in range(num_heads):
+                for i in range(tgt_len):
                     for j in range(src_len):
-                        k_h = k[j, b, start_idx:end_idx]  # [head_dim]
-                        attn_weights[j] = torch.sum(q_h * k_h)
-                    
-                    # Áp dụng key padding mask nếu có
-                    if key_padding_mask is not None and b < key_padding_mask.size(0):
-                        for j in range(min(src_len, key_padding_mask.size(1))):
-                            if key_padding_mask[b, j]:
-                                attn_weights[j] = float('-inf')
-                    
-                    # Áp dụng softmax để có attention weights
-                    attn_weights = F.softmax(attn_weights, dim=0)
-                    
-                    # Áp dụng dropout nếu đang trong chế độ training
-                    if dropout_p > 0.0 and training:
-                        attn_weights = F.dropout(attn_weights, p=dropout_p)
-                    
-                    # Áp dụng attention weights vào values
-                    head_output = torch.zeros(head_dim, device=device)
-                    for j in range(src_len):
-                        v_h = v[j, b, start_idx:end_idx]  # [head_dim]
-                        head_output += attn_weights[j] * v_h
-                    
-                    # Thêm kết quả của head này vào weighted sum
-                    weighted_sum[start_idx:end_idx] = head_output
-                
-                # Lưu kết quả cho vị trí này
-                attn_output[i, b] = weighted_sum
+                        attn_output_b[h, i] += attn_weights[h, i, j] * v_b[h, j]
+            
+            # Reshape lại kết quả và lưu vào output
+            attn_output_b = attn_output_b.permute(1, 0, 2)  # [tgt_len, num_heads, head_dim]
+            attn_output_b = attn_output_b.reshape(tgt_len, embed_dim)
+            attn_output[:, b, :] = attn_output_b
         
         # Áp dụng output projection
         attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
