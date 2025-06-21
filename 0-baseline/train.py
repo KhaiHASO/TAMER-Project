@@ -7,5 +7,5 @@ cli = LightningCLI(
     LitTAMER,
     HMEDatamodule,
     save_config_kwargs={"overwrite": True},
-    trainer_defaults={"strategy": "ddp"},
+    trainer_defaults={"strategy": "auto"},
 )
