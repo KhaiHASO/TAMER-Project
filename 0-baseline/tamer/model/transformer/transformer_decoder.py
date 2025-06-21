@@ -5,6 +5,7 @@ from typing import Optional
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+import torch
 
 from .arm import AttentionRefinementModule
 from .attention import MultiheadAttention
@@ -110,6 +111,33 @@ class TransformerDecoderLayer(nn.Module):
         Shape:
             see the docs in Transformer class.
         """
+        # Get device from input tensors
+        device = tgt.device
+        
+        # Ensure masks are on the same device as tgt
+        if tgt_mask is not None:
+            tgt_mask = tgt_mask.to(device)
+        
+        if tgt_key_padding_mask is not None:
+            tgt_key_padding_mask = tgt_key_padding_mask.to(device)
+            
+        if memory_mask is not None:
+            memory_mask = memory_mask.to(device)
+            
+        if memory_key_padding_mask is not None:
+            memory_key_padding_mask = memory_key_padding_mask.to(device)
+            
+            # Ensure memory_key_padding_mask has the right shape
+            b, seq_len = memory.shape[1], memory.shape[0]
+            if memory_key_padding_mask.shape[0] != b or memory_key_padding_mask.shape[1] != seq_len:
+                # Create a new mask with the right shape
+                new_mask = torch.zeros((b, seq_len), dtype=torch.bool, device=device)
+                # Copy as much as we can from the original mask
+                copy_rows = min(memory_key_padding_mask.shape[0], b)
+                copy_cols = min(memory_key_padding_mask.shape[1], seq_len)
+                new_mask[:copy_rows, :copy_cols] = memory_key_padding_mask[:copy_rows, :copy_cols]
+                memory_key_padding_mask = new_mask
+        
         tgt2 = self.self_attn(
             tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
         )[0]

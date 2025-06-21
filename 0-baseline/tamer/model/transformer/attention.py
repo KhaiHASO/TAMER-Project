@@ -379,18 +379,34 @@ def multi_head_attention_forward(
                         )
                         key_padding_mask = torch.cat([key_padding_mask, padding], dim=0)
         
+        # Check if we need to adjust the sequence length
+        if key_padding_mask.size(1) != src_len:
+            # If the sequence length doesn't match, we need to resize the key_padding_mask
+            if key_padding_mask.size(1) > src_len:
+                # If the mask is too large, truncate it
+                key_padding_mask = key_padding_mask[:, :src_len]
+            else:
+                # If the mask is too small, pad it with False (no padding)
+                padding = torch.zeros(
+                    (key_padding_mask.size(0), src_len - key_padding_mask.size(1)),
+                    dtype=key_padding_mask.dtype,
+                    device=key_padding_mask.device
+                )
+                key_padding_mask = torch.cat([key_padding_mask, padding], dim=1)
+        
         # Final check to ensure sizes match
-        if key_padding_mask.size(0) != bsz:
-            print(f"Warning: key_padding_mask size ({key_padding_mask.size()}) doesn't match bsz ({bsz}), using workaround")
+        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
+            print(f"Warning: key_padding_mask size ({key_padding_mask.size()}) doesn't match required size ({bsz}, {src_len}), using workaround")
             # Last resort: create a new mask of the right size
             new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=k.device)
             # Copy as much as we can from the original mask
-            copy_size = min(key_padding_mask.size(0), bsz)
-            new_mask[:copy_size, :key_padding_mask.size(1)] = key_padding_mask[:copy_size, :]
+            copy_rows = min(key_padding_mask.size(0), bsz)
+            copy_cols = min(key_padding_mask.size(1), src_len)
+            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
             key_padding_mask = new_mask
             
         assert key_padding_mask.size(0) == bsz, f"key_padding_mask size: {key_padding_mask.size()}, bsz: {bsz}"
-        assert key_padding_mask.size(1) == src_len
+        assert key_padding_mask.size(1) == src_len, f"key_padding_mask size: {key_padding_mask.size()}, src_len: {src_len}"
 
     if add_zero_attn:
         src_len += 1
