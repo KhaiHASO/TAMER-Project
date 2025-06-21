@@ -15,6 +15,7 @@ trainer:
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
         save_dir: lightning_logs
+        name: .
   accelerator: cpu      # hoặc "gpu" nếu bạn dùng GPU
   devices: 1
   #accelerator: ddp
