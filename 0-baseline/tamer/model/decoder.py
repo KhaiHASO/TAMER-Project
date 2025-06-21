@@ -161,10 +161,18 @@ class Decoder(DecodeModel):
         FloatTensor
             [b, l, vocab_size]
         """
+        # Make sure all inputs are on the same device
+        device = self.device
+        src = src.to(device)
+        src_mask = src_mask.to(device)
+        tgt = tgt.to(device)
+        
         _, l = tgt.size()
-        tgt_mask = self._build_attention_mask(l)
-        tgt_pad_mask = tgt == vocab.PAD_IDX
+        tgt_mask = self._build_attention_mask(l).to(device)
+        tgt_pad_mask = (tgt == vocab.PAD_IDX).to(device)
 
+        # Move tgt to device if needed and ensure it's a LongTensor
+        tgt = tgt.to(device=device, dtype=torch.long) 
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]
         tgt = self.norm(tgt)
