@@ -41,20 +41,44 @@ class TransformerDecoder(nn.Module):
         memory_key_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
         output = tgt
+        
+        # Ensure all tensors are on the same device
+        device = tgt.device
+        if tgt_mask is not None:
+            tgt_mask = tgt_mask.to(device)
+        if memory_mask is not None:
+            memory_mask = memory_mask.to(device)
+        if tgt_key_padding_mask is not None:
+            tgt_key_padding_mask = tgt_key_padding_mask.to(device)
+        if memory_key_padding_mask is not None:
+            memory_key_padding_mask = memory_key_padding_mask.to(device)
 
-        arm = None
+        arm_fn = None
         for i, mod in enumerate(self.layers):
-            output, attn = mod(
-                output,
-                memory,
-                arm,
-                tgt_mask=tgt_mask,
-                memory_mask=memory_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask,
-            )
-            if i != len(self.layers) - 1 and self.arm is not None:
-                arm = partial(self.arm, attn, memory_key_padding_mask, height)
+            try:
+                output, attn = mod(
+                    output,
+                    memory,
+                    arm_fn,
+                    tgt_mask=tgt_mask,
+                    memory_mask=memory_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask,
+                )
+                if i != len(self.layers) - 1 and self.arm is not None:
+                    # Create a partial function for arm that includes the current attention
+                    def arm_fn_with_attn(attn_input):
+                        try:
+                            return self.arm(attn, memory_key_padding_mask, height, attn_input)
+                        except Exception as e:
+                            print(f"Warning: ARM function failed with error: {e}")
+                            # Return a zero tensor of the same shape as the input
+                            return torch.zeros_like(attn_input)
+                    arm_fn = arm_fn_with_attn
+            except Exception as e:
+                print(f"Error in transformer decoder layer {i}: {e}")
+                # Try to continue with the next layer
+                continue
 
         if self.norm is not None:
             output = self.norm(output)

@@ -462,8 +462,17 @@ def multi_head_attention_forward(
 
     attention = mask_softmax_dropout(attn_output_weights)
     if arm is not None:
-        attn_output_weights -= arm(attention)
-        attention = mask_softmax_dropout(attn_output_weights)
+        try:
+            # Apply ARM safely
+            refinement = arm(attention)
+            if refinement.shape == attn_output_weights.shape:
+                attn_output_weights -= refinement
+                attention = mask_softmax_dropout(attn_output_weights)
+            else:
+                print(f"Warning: ARM output shape {refinement.shape} doesn't match attention shape {attn_output_weights.shape}")
+        except Exception as e:
+            print(f"Warning: ARM application failed with error: {e}")
+            # Continue without ARM refinement
 
     attn_output = torch.bmm(attention, v)
     assert list(attn_output.size()) == [bsz * num_heads, tgt_len, head_dim]

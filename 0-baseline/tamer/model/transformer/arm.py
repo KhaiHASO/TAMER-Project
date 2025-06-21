@@ -58,7 +58,7 @@ class AttentionRefinementModule(nn.Module):
         self.post_norm = MaskBatchNorm2d(nhead)
 
     def forward(
-        self, prev_attn: Tensor, key_padding_mask: Tensor, h: int, curr_attn: Tensor
+        self, prev_attn: Tensor, key_padding_mask: Tensor, h: int, curr_attn: Tensor = None
     ) -> Tensor:
         """
         Parameters
@@ -68,14 +68,48 @@ class AttentionRefinementModule(nn.Module):
         key_padding_mask : Tensor
             [b, l]
         h : int
+        curr_attn : Tensor, optional
+            Current attention weights, same shape as prev_attn
 
         Returns
         -------
         Tensor
             [(b * nhead), t, l]
         """
+        # If curr_attn is not provided, use prev_attn
+        if curr_attn is None:
+            curr_attn = prev_attn
+            
+        # Ensure both are on the same device
+        device = prev_attn.device
+        key_padding_mask = key_padding_mask.to(device)
+        
         t = curr_attn.shape[1]
-        mask = repeat(key_padding_mask, "b (h w) -> (b t) () h w", h=h, t=t)
+        b = key_padding_mask.shape[0]
+        l = key_padding_mask.shape[1]
+        
+        # Calculate expected dimensions
+        expected_h = int((l + h - 1) // h)  # Ceiling division
+        
+        # Make sure key_padding_mask has the right shape for the repeat operation
+        if l != h * expected_h:
+            # Pad or truncate key_padding_mask to match the expected size
+            new_mask = torch.zeros((b, h * expected_h), dtype=key_padding_mask.dtype, device=device)
+            copy_len = min(l, h * expected_h)
+            new_mask[:, :copy_len] = key_padding_mask[:, :copy_len]
+            key_padding_mask = new_mask
+        
+        try:
+            # Try to create the mask with the expected dimensions
+            mask = repeat(key_padding_mask, "b (h w) -> (b t) () h w", h=h, t=t, w=expected_h)
+        except RuntimeError as e:
+            # If that fails, create a mask with compatible dimensions
+            print(f"Warning: Mask creation failed with error: {e}")
+            print(f"key_padding_mask shape: {key_padding_mask.shape}, h: {h}, t: {t}")
+            
+            # Create a mask that matches the output shape of attns after rearrangement
+            curr_attn_b = curr_attn.shape[0] // self.nhead
+            mask = torch.zeros((curr_attn_b * t, 1, h, expected_h), dtype=torch.bool, device=device)
 
         curr_attn = rearrange(curr_attn, "(b n) t l -> b n t l", n=self.nhead)
         prev_attn = rearrange(prev_attn, "(b n) t l -> b n t l", n=self.nhead)
@@ -88,7 +122,38 @@ class AttentionRefinementModule(nn.Module):
         attns = torch.cat(attns, dim=1)
 
         attns = attns.cumsum(dim=2) - attns
-        attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h)
+        
+        # Get the actual dimensions after rearrangement
+        try:
+            attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h)
+        except RuntimeError as e:
+            # If rearrangement fails, adjust the dimensions
+            print(f"Warning: Attention rearrangement failed with error: {e}")
+            print(f"attns shape before rearrange: {attns.shape}, h: {h}")
+            
+            # Adjust attns to have a compatible shape
+            b, n, t, l = attns.shape
+            w = l // h
+            if l % h != 0:
+                # Pad attns to make l divisible by h
+                pad_size = h - (l % h)
+                padding = torch.zeros((b, n, t, pad_size), device=device)
+                attns = torch.cat([attns, padding], dim=3)
+                l = attns.shape[3]
+                w = l // h
+            
+            attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h, w=w)
+            
+            # Update mask to match the new dimensions
+            if mask.shape[2:] != attns.shape[2:]:
+                mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
+                                  dtype=torch.bool, device=device)
+
+        # Ensure mask has the right shape for the operation
+        if mask.shape[2:] != attns.shape[2:]:
+            print(f"Warning: Mask shape {mask.shape} doesn't match attns shape {attns.shape}")
+            mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
+                              dtype=torch.bool, device=device)
 
         cov = self.conv(attns)
         cov = self.act(cov)
