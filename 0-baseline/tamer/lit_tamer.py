@@ -78,11 +78,22 @@ class LitTAMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
+        # Ensure all inputs are on the same device
+        device = self.device
+        img = img.to(device)
+        img_mask = img_mask.to(device)
+        tgt = tgt.to(device)
+        
         return self.tamer_model(img, img_mask, tgt)
 
     def training_step(self, batch: Batch, _):
-        tgt, out = to_bi_tgt_out(batch.indices, self.device)
-        struct_out, _ = to_struct_output(batch.indices, self.device)
+        # Ensure batch data is on the correct device
+        device = self.device
+        batch.imgs = batch.imgs.to(device)
+        batch.mask = batch.mask.to(device)
+        
+        tgt, out = to_bi_tgt_out(batch.indices, device)
+        struct_out, _ = to_struct_output(batch.indices, device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
@@ -100,8 +111,13 @@ class LitTAMER(pl.LightningModule):
 
 
     def validation_step(self, batch: Batch, _):
-        tgt, out = to_bi_tgt_out(batch.indices, self.device)
-        struct_out, _ = to_struct_output(batch.indices, self.device)
+        # Ensure batch data is on the correct device
+        device = self.device
+        batch.imgs = batch.imgs.to(device)
+        batch.mask = batch.mask.to(device)
+        
+        tgt, out = to_bi_tgt_out(batch.indices, device)
+        struct_out, _ = to_struct_output(batch.indices, device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
@@ -145,6 +161,11 @@ class LitTAMER(pl.LightningModule):
         )
 
     def test_step(self, batch: Batch, _):
+        # Ensure batch data is on the correct device
+        device = self.device
+        batch.imgs = batch.imgs.to(device)
+        batch.mask = batch.mask.to(device)
+        
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
         gts = [vocab.indices2words(ind) for ind in batch.indices]

@@ -381,15 +381,19 @@ def multi_head_attention_forward(
 
     def mask_softmax_dropout(dots):
         if attn_mask is not None:
-            if attn_mask.dtype == torch.bool:
-                dots.masked_fill_(attn_mask, float("-inf"))
+            # Make sure attn_mask is on the same device as dots
+            attn_mask_device = attn_mask.to(dots.device)
+            if attn_mask_device.dtype == torch.bool:
+                dots.masked_fill_(attn_mask_device, float("-inf"))
             else:
-                dots += attn_mask
+                dots += attn_mask_device
 
         if key_padding_mask is not None:
+            # Make sure key_padding_mask is on the same device as dots
+            key_padding_mask_device = key_padding_mask.to(dots.device)
             dots = dots.view(bsz, num_heads, tgt_len, src_len)
             dots = dots.masked_fill(
-                key_padding_mask.unsqueeze(1).unsqueeze(2),
+                key_padding_mask_device.unsqueeze(1).unsqueeze(2),
                 float("-inf"),
             )
             dots = dots.view(bsz * num_heads, tgt_len, src_len)
