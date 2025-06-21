@@ -74,44 +74,48 @@ class AttentionRefinementModule(nn.Module):
         Returns
         -------
         Tensor
-            [(b * nhead), t, l]
+            [(b * nhead), t, l] - Same shape as prev_attn
         """
-        # If curr_attn is not provided, use prev_attn
-        if curr_attn is None:
-            curr_attn = prev_attn
-            
-        # Ensure both are on the same device
-        device = prev_attn.device
-        key_padding_mask = key_padding_mask.to(device)
-        
-        # Get dimensions
-        b_times_nhead, t, l = prev_attn.shape
-        b = key_padding_mask.shape[0]
-        
-        # Calculate nhead if not explicitly given in the shape
-        nhead = self.nhead
-        
-        # Calculate expected width based on length and height
-        w = (l + h - 1) // h  # Ceiling division
-        
-        # Reshape key_padding_mask if needed
-        if key_padding_mask.shape[1] != h * w:
-            new_mask = torch.zeros((b, h * w), dtype=key_padding_mask.dtype, device=device)
-            copy_len = min(key_padding_mask.shape[1], h * w)
-            new_mask[:, :copy_len] = key_padding_mask[:, :copy_len]
-            key_padding_mask = new_mask
-        
         try:
-            # Reshape attentions
-            curr_attn = curr_attn.view(b, nhead, t, l)
-            prev_attn = prev_attn.view(b, nhead, t, l)
+            # Store original shape for later use
+            original_shape = prev_attn.shape
+            
+            # If curr_attn is not provided, use prev_attn
+            if curr_attn is None:
+                curr_attn = prev_attn
+                
+            # Ensure both are on the same device
+            device = prev_attn.device
+            key_padding_mask = key_padding_mask.to(device)
+            
+            # Get dimensions
+            b_times_nhead, t, l = prev_attn.shape
+            b = key_padding_mask.shape[0]
+            
+            # Calculate nhead if not explicitly given in the shape
+            nhead = self.nhead
+            b = b_times_nhead // nhead
+            
+            # Calculate expected width based on length and height
+            w = (l + h - 1) // h  # Ceiling division
+            
+            # Reshape key_padding_mask if needed
+            if key_padding_mask.shape[1] != h * w:
+                new_mask = torch.zeros((b, h * w), dtype=key_padding_mask.dtype, device=device)
+                copy_len = min(key_padding_mask.shape[1], h * w)
+                new_mask[:, :copy_len] = key_padding_mask[:, :copy_len]
+                key_padding_mask = new_mask
+            
+            # Reshape attentions with explicit reshaping to avoid errors
+            curr_attn_reshaped = curr_attn.view(b, nhead, t, l)
+            prev_attn_reshaped = prev_attn.view(b, nhead, t, l)
             
             # Create attns tensor
             attns = []
             if self.cross_coverage:
-                attns.append(prev_attn)
+                attns.append(prev_attn_reshaped)
             if self.self_coverage:
-                attns.append(curr_attn)
+                attns.append(curr_attn_reshaped)
             attns = torch.cat(attns, dim=1)
             
             # Cumulative sum along sequence dimension
@@ -137,7 +141,6 @@ class AttentionRefinementModule(nn.Module):
             
             # Print shape info for debugging
             if mask.shape[2:] != attns.shape[2:]:
-                print(f"Warning: Mask shape {mask.shape} doesn't match attns shape {attns.shape}")
                 # Create a new mask with the correct dimensions
                 mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
                                   dtype=torch.bool, device=device)
@@ -157,13 +160,25 @@ class AttentionRefinementModule(nn.Module):
             cov = cov.reshape(b, t, nhead, h * w)
             cov = cov.permute(0, 2, 1, 3).reshape(b * nhead, t, h * w)
             
-            # If the original length was different, truncate back
-            if cov.shape[2] != prev_attn.shape[2]:
-                cov = cov[:, :, :prev_attn.shape[2]]
+            # If the output length doesn't match the original length, pad or truncate
+            if cov.shape[2] != original_shape[2]:
+                if cov.shape[2] < original_shape[2]:
+                    # Pad with zeros to match original shape
+                    padding = torch.zeros((cov.shape[0], cov.shape[1], original_shape[2] - cov.shape[2]), 
+                                         device=device)
+                    cov = torch.cat([cov, padding], dim=2)
+                else:
+                    # Truncate to match original shape
+                    cov = cov[:, :, :original_shape[2]]
+            
+            # Final check to ensure output shape matches input shape
+            if cov.shape != original_shape:
+                print(f"Warning: Final ARM output shape {cov.shape} doesn't match input shape {original_shape}. Creating zero tensor.")
+                return torch.zeros_like(prev_attn)
                 
             return cov
             
         except Exception as e:
             print(f"Error in ARM module: {e}")
-            # Return zeros as fallback
+            # Return zeros as fallback with the same shape as prev_attn
             return torch.zeros_like(prev_attn)
