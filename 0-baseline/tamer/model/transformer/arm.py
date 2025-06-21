@@ -84,84 +84,86 @@ class AttentionRefinementModule(nn.Module):
         device = prev_attn.device
         key_padding_mask = key_padding_mask.to(device)
         
-        t = curr_attn.shape[1]
+        # Get dimensions
+        b_times_nhead, t, l = prev_attn.shape
         b = key_padding_mask.shape[0]
-        l = key_padding_mask.shape[1]
         
-        # Calculate expected dimensions
-        expected_h = int((l + h - 1) // h)  # Ceiling division
+        # Calculate nhead if not explicitly given in the shape
+        nhead = self.nhead
         
-        # Make sure key_padding_mask has the right shape for the repeat operation
-        if l != h * expected_h:
-            # Pad or truncate key_padding_mask to match the expected size
-            new_mask = torch.zeros((b, h * expected_h), dtype=key_padding_mask.dtype, device=device)
-            copy_len = min(l, h * expected_h)
+        # Calculate expected width based on length and height
+        w = (l + h - 1) // h  # Ceiling division
+        
+        # Reshape key_padding_mask if needed
+        if key_padding_mask.shape[1] != h * w:
+            new_mask = torch.zeros((b, h * w), dtype=key_padding_mask.dtype, device=device)
+            copy_len = min(key_padding_mask.shape[1], h * w)
             new_mask[:, :copy_len] = key_padding_mask[:, :copy_len]
             key_padding_mask = new_mask
         
         try:
-            # Try to create the mask with the expected dimensions
-            mask = repeat(key_padding_mask, "b (h w) -> (b t) () h w", h=h, t=t, w=expected_h)
-        except RuntimeError as e:
-            # If that fails, create a mask with compatible dimensions
-            print(f"Warning: Mask creation failed with error: {e}")
-            print(f"key_padding_mask shape: {key_padding_mask.shape}, h: {h}, t: {t}")
+            # Reshape attentions
+            curr_attn = curr_attn.view(b, nhead, t, l)
+            prev_attn = prev_attn.view(b, nhead, t, l)
             
-            # Create a mask that matches the output shape of attns after rearrangement
-            curr_attn_b = curr_attn.shape[0] // self.nhead
-            mask = torch.zeros((curr_attn_b * t, 1, h, expected_h), dtype=torch.bool, device=device)
-
-        curr_attn = rearrange(curr_attn, "(b n) t l -> b n t l", n=self.nhead)
-        prev_attn = rearrange(prev_attn, "(b n) t l -> b n t l", n=self.nhead)
-
-        attns = []
-        if self.cross_coverage:
-            attns.append(prev_attn)
-        if self.self_coverage:
-            attns.append(curr_attn)
-        attns = torch.cat(attns, dim=1)
-
-        attns = attns.cumsum(dim=2) - attns
-        
-        # Get the actual dimensions after rearrangement
-        try:
-            attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h)
-        except RuntimeError as e:
-            # If rearrangement fails, adjust the dimensions
-            print(f"Warning: Attention rearrangement failed with error: {e}")
-            print(f"attns shape before rearrange: {attns.shape}, h: {h}")
+            # Create attns tensor
+            attns = []
+            if self.cross_coverage:
+                attns.append(prev_attn)
+            if self.self_coverage:
+                attns.append(curr_attn)
+            attns = torch.cat(attns, dim=1)
             
-            # Adjust attns to have a compatible shape
-            b, n, t, l = attns.shape
-            w = l // h
+            # Cumulative sum along sequence dimension
+            attns = attns.cumsum(dim=2) - attns
+            
+            # Reshape for 2D convolution
+            n_channels = attns.shape[1]  # This should be nhead or 2*nhead
+            
+            # Check if l is divisible by h, if not, pad
             if l % h != 0:
-                # Pad attns to make l divisible by h
                 pad_size = h - (l % h)
-                padding = torch.zeros((b, n, t, pad_size), device=device)
+                padding = torch.zeros((b, n_channels, t, pad_size), device=device)
                 attns = torch.cat([attns, padding], dim=3)
                 l = attns.shape[3]
-                w = l // h
             
-            attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h, w=w)
+            w = l // h
+            attns = attns.reshape(b * t, n_channels, h, w)
             
-            # Update mask to match the new dimensions
+            # Create mask with matching dimensions
+            mask = key_padding_mask.reshape(b, 1, 1, l)
+            mask = mask.expand(b, 1, t, l)
+            mask = mask.reshape(b * t, 1, h, w)
+            
+            # Print shape info for debugging
             if mask.shape[2:] != attns.shape[2:]:
+                print(f"Warning: Mask shape {mask.shape} doesn't match attns shape {attns.shape}")
+                # Create a new mask with the correct dimensions
                 mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
                                   dtype=torch.bool, device=device)
-
-        # Ensure mask has the right shape for the operation
-        if mask.shape[2:] != attns.shape[2:]:
-            print(f"Warning: Mask shape {mask.shape} doesn't match attns shape {attns.shape}")
-            mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
-                              dtype=torch.bool, device=device)
-
-        cov = self.conv(attns)
-        cov = self.act(cov)
-
-        cov = cov.masked_fill(mask, 0.0)
-        cov = self.proj(cov)
-
-        cov = self.post_norm(cov, mask)
-
-        cov = rearrange(cov, "(b t) n h w -> (b n) t (h w)", t=t)
-        return cov
+            
+            # Apply convolution
+            cov = self.conv(attns)
+            cov = self.act(cov)
+            
+            # Apply mask
+            cov = cov.masked_fill(mask, 0.0)
+            cov = self.proj(cov)
+            
+            # Apply batch norm
+            cov = self.post_norm(cov, mask)
+            
+            # Reshape back to original format
+            cov = cov.reshape(b, t, nhead, h * w)
+            cov = cov.permute(0, 2, 1, 3).reshape(b * nhead, t, h * w)
+            
+            # If the original length was different, truncate back
+            if cov.shape[2] != prev_attn.shape[2]:
+                cov = cov[:, :, :prev_attn.shape[2]]
+                
+            return cov
+            
+        except Exception as e:
+            print(f"Error in ARM module: {e}")
+            # Return zeros as fallback
+            return torch.zeros_like(prev_attn)

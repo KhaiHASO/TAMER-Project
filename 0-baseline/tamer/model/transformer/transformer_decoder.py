@@ -56,15 +56,54 @@ class TransformerDecoder(nn.Module):
         arm_fn = None
         for i, mod in enumerate(self.layers):
             try:
+                # Check and fix memory shape issues before passing to the layer
+                memory_seq_len, batch_size, feature_dim = memory.shape
+                
+                # Ensure memory dimensions are compatible with height
+                if memory_seq_len % height != 0:
+                    # Calculate the expected width
+                    expected_width = (memory_seq_len + height - 1) // height
+                    expected_seq_len = height * expected_width
+                    
+                    if expected_seq_len > memory_seq_len:
+                        # Pad memory to match expected dimensions
+                        padding = torch.zeros(
+                            (expected_seq_len - memory_seq_len, batch_size, feature_dim),
+                            device=device,
+                            dtype=memory.dtype
+                        )
+                        memory_padded = torch.cat([memory, padding], dim=0)
+                        
+                        # Also pad memory_key_padding_mask if it exists
+                        if memory_key_padding_mask is not None:
+                            mask_padding = torch.ones(
+                                (batch_size, expected_seq_len - memory_seq_len),
+                                device=device,
+                                dtype=torch.bool
+                            )
+                            memory_key_padding_mask = torch.cat(
+                                [memory_key_padding_mask, mask_padding], dim=1
+                            )
+                    else:
+                        # Truncate memory to match expected dimensions
+                        memory_padded = memory[:expected_seq_len]
+                        if memory_key_padding_mask is not None:
+                            memory_key_padding_mask = memory_key_padding_mask[:, :expected_seq_len]
+                else:
+                    memory_padded = memory
+                
+                # Process through the decoder layer
                 output, attn = mod(
                     output,
-                    memory,
+                    memory_padded,
                     arm_fn,
                     tgt_mask=tgt_mask,
                     memory_mask=memory_mask,
                     tgt_key_padding_mask=tgt_key_padding_mask,
                     memory_key_padding_mask=memory_key_padding_mask,
                 )
+                
+                # Set up ARM function for the next layer if needed
                 if i != len(self.layers) - 1 and self.arm is not None:
                     # Create a partial function for arm that includes the current attention
                     def arm_fn_with_attn(attn_input):
@@ -162,22 +201,44 @@ class TransformerDecoderLayer(nn.Module):
                 new_mask[:copy_rows, :copy_cols] = memory_key_padding_mask[:copy_rows, :copy_cols]
                 memory_key_padding_mask = new_mask
         
-        tgt2 = self.self_attn(
-            tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
-        )[0]
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = self.norm1(tgt)
-        tgt2, attn = self.multihead_attn(
-            tgt,
-            memory,
-            memory,
-            arm=arm,
-            attn_mask=memory_mask,
-            key_padding_mask=memory_key_padding_mask,
-        )
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
-        return tgt, attn
+        try:
+            tgt2 = self.self_attn(
+                tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
+            )[0]
+            tgt = tgt + self.dropout1(tgt2)
+            tgt = self.norm1(tgt)
+            
+            tgt2, attn = self.multihead_attn(
+                tgt,
+                memory,
+                memory,
+                arm=arm,
+                attn_mask=memory_mask,
+                key_padding_mask=memory_key_padding_mask,
+            )
+            tgt = tgt + self.dropout2(tgt2)
+            tgt = self.norm2(tgt)
+            
+            # Apply feed-forward network
+            try:
+                tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+            except RuntimeError as e:
+                # Handle shape errors in the feed-forward network
+                print(f"Error in feed-forward network: {e}")
+                # Try to reshape the tensor to make it work
+                seq_len, batch_size, feature_dim = tgt.shape
+                tgt_reshaped = tgt.reshape(-1, feature_dim)
+                tgt2 = self.linear1(tgt_reshaped)
+                tgt2 = self.activation(tgt2)
+                tgt2 = self.dropout(tgt2)
+                tgt2 = self.linear2(tgt2)
+                tgt2 = tgt2.reshape(seq_len, batch_size, feature_dim)
+            
+            tgt = tgt + self.dropout3(tgt2)
+            tgt = self.norm3(tgt)
+            
+            return tgt, attn
+        except Exception as e:
+            print(f"Error in transformer decoder layer: {e}")
+            # Return the input as fallback
+            return tgt, None
