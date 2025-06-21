@@ -111,8 +111,13 @@ class Decoder(DecodeModel):
     ):
         super().__init__()
 
+        # Create embedding layers
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+        # Create a sequential container for word embedding
         self.word_embed = nn.Sequential(
-            nn.Embedding(vocab_size, d_model), nn.LayerNorm(d_model)
+            self.embedding, self.layer_norm
         )
 
         self.pos_enc = WordPosEnc(d_model=d_model)
@@ -167,6 +172,9 @@ class Decoder(DecodeModel):
         src_mask = src_mask.to(device)
         tgt = tgt.to(device)
         
+        # Make sure all modules are on the correct device
+        self.to(device)
+        
         _, l = tgt.size()
         tgt_mask = self._build_attention_mask(l).to(device)
         tgt_pad_mask = (tgt == vocab.PAD_IDX).to(device)
@@ -210,3 +218,26 @@ class Decoder(DecodeModel):
         input_ids = input_ids.to(device)
         
         return self(src[0], src_mask[0], input_ids)
+
+    @property
+    def device(self) -> torch.device:
+        """Get the device of the model"""
+        return next(self.parameters()).device
+        
+    def to(self, device):
+        """Override to method to ensure all modules are moved to the correct device"""
+        super().to(device)
+        if hasattr(self, 'word_embed'):
+            for module in self.word_embed:
+                module.to(device)
+        if hasattr(self, 'pos_enc'):
+            self.pos_enc.to(device)
+        if hasattr(self, 'norm'):
+            self.norm.to(device)
+        if hasattr(self, 'model'):
+            self.model.to(device)
+        if hasattr(self, 'proj'):
+            self.proj.to(device)
+        if hasattr(self, 'struct_sim'):
+            self.struct_sim.to(device)
+        return self
