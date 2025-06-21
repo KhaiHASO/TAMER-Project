@@ -12,7 +12,7 @@ trainer:
         mode: max
         filename: '{epoch}-{step}-{val_ExpRate:.4f}'
   devices: 1
-  accelerator: cpu
+  accelerator: gpu
   # For debug
   overfit_batches: 1
   check_val_every_n_epoch: 1
