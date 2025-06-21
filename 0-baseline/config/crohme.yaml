@@ -38,17 +38,17 @@ model:
   cross_coverage: true
   self_coverage: true
   # beam search
-  beam_size: 10
-  max_len: 200
+  beam_size: 5
+  max_len: 100
   alpha: 1.0
-  early_stopping: false
+  early_stopping: true
   temperature: 1.0
   # training
-  learning_rate: 1.0
-  patience: 20
+  learning_rate: 0.01
+  patience: 10
   milestones:
-    - 300
-    - 350
+    - 30
+    - 60
 
 data:
   folder: data/crohme

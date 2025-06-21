@@ -85,6 +85,25 @@ class LitTAMER(pl.LightningModule):
         struct_out, _ = to_struct_output(batch.indices, self.device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
+        if self.global_step % 10 == 0:
+            print("DEBUG: Training step output check")
+            print(f"DEBUG: out_hat shape: {out_hat.shape}, out shape: {out.shape}")
+            has_nan = torch.isnan(out_hat).any().item()
+            has_inf = torch.isinf(out_hat).any().item()
+            print(f"DEBUG: Has NaN: {has_nan}, Has Inf: {has_inf}")
+            
+            softmax_out = torch.softmax(out_hat, dim=-1)
+            top_probs, top_indices = torch.topk(softmax_out[0, 0], 5)
+            print(f"DEBUG: Top 5 probs for first token: {top_probs}")
+            print(f"DEBUG: Top 5 indices for first token: {top_indices}")
+            top_words = []
+            for idx in top_indices:
+                try:
+                    top_words.append(vocab.indices2words([idx.item()])[0])
+                except:
+                    top_words.append("<error>")
+            print(f"DEBUG: Top 5 words for first token: {top_words}")
+
         loss = ce_loss(out_hat, out)
         self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         struct_loss = ce_loss(sim, struct_out, ignore_idx=-1)
@@ -123,19 +142,23 @@ class LitTAMER(pl.LightningModule):
             sync_dist=True,
         )
 
-        # if self.current_epoch < self.hparams.milestones[0]:
-        #     self.log(
-        #         "val_ExpRate",
-        #         self.exprate_recorder,
-        #         prog_bar=True,
-        #         on_step=False,
-        #         on_epoch=True,
-        #     )
-        #     return
-
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
 
+        print("DEBUG: Beam search predictions:")
+        pred_seqs = [h.seq for h in hyps]
+        for i, (pred, gt) in enumerate(zip(pred_seqs, batch.indices)):
+            pred_words = vocab.indices2words(pred)
+            gt_words = vocab.indices2words(gt)
+            print(f"Sample {i}")
+            print(f"  Pred indices: {pred}")
+            print(f"  GT indices: {gt}")
+            print(f"  Pred words: {' '.join(pred_words)}")
+            print(f"  GT words: {' '.join(gt_words)}")
+            print(f"  Match: {pred == gt}")
+        
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
+        exp_rate = self.exprate_recorder.compute()
+        print(f"DEBUG: Current ExpRate: {exp_rate}")
         self.log(
             "val_ExpRate",
             self.exprate_recorder,
