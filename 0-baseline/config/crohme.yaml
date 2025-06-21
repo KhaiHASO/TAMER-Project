@@ -14,9 +14,8 @@ trainer:
   logger:
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
-        save_dir: logs/
-        name: debug_overfit
-  accelerator: gpu      # hoặc "gpu" nếu bạn dùng GPU
+        save_dir: lightning_logs
+  accelerator: cpu      # hoặc "gpu" nếu bạn dùng GPU
   devices: 1
   #accelerator: ddp
   check_val_every_n_epoch: 1
