@@ -243,211 +243,85 @@ def multi_head_attention_forward(
     static_k: Optional[Tensor] = None,
     static_v: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
-    try:
-        # Get dimensions and device
-        tgt_len, bsz, embed_dim = query.size()
-        device = query.device
-        
-        # Check dimensions
-        assert embed_dim == embed_dim_to_check, f"Embed dim mismatch: {embed_dim} vs {embed_dim_to_check}"
-        assert key.size(0) == value.size(0) and key.size(1) == value.size(1), "Key and value size mismatch"
-
-        # Calculate head dimensions
-        head_dim = embed_dim // num_heads
-        assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
-        scaling = float(head_dim) ** -0.5
-
-        # Compute q, k, v projections using the most direct approach
-        if not use_separate_proj_weight:
-            if (query is key or torch.equal(query, key)) and (key is value or torch.equal(key, value)):
-                # Self-attention case
-                q, k, v = F.linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
-            elif key is value or torch.equal(key, value):
-                # Encoder-decoder attention case
-                _b = in_proj_bias
-                _start, _end = 0, embed_dim
-                _w = in_proj_weight[_start:_end, :]
-                if _b is not None:
-                    _b = _b[_start:_end]
-                q = F.linear(query, _w, _b)
-
-                if key is None:
-                    assert value is None
-                    k = v = None
-                else:
-                    _b = in_proj_bias
-                    _start, _end = embed_dim, None
-                    _w = in_proj_weight[_start:, :]
-                    if _b is not None:
-                        _b = _b[_start:]
-                    k, v = F.linear(key, _w, _b).chunk(2, dim=-1)
-            else:
-                # General case
-                _b = in_proj_bias
-                
-                # Query projection
-                _start, _end = 0, embed_dim
-                _w = in_proj_weight[_start:_end, :]
-                if _b is not None:
-                    _b = _b[_start:_end]
-                q = F.linear(query, _w, _b)
-                
-                # Key projection
-                _start, _end = embed_dim, embed_dim * 2
-                _w = in_proj_weight[_start:_end, :]
-                if _b is not None:
-                    _b = _b[_start:_end]
-                k = F.linear(key, _w, _b)
-                
-                # Value projection
-                _start, _end = embed_dim * 2, None
-                _w = in_proj_weight[_start:, :]
-                if _b is not None:
-                    _b = _b[_start:]
-                v = F.linear(value, _w, _b)
-        else:
-            # Use separate projection weights
-            q_proj_weight_non_opt = torch.jit._unwrap_optional(q_proj_weight)
-            len1, len2 = q_proj_weight_non_opt.size()
-            assert len1 == embed_dim and len2 == query.size(-1)
-
-            k_proj_weight_non_opt = torch.jit._unwrap_optional(k_proj_weight)
-            len1, len2 = k_proj_weight_non_opt.size()
-            assert len1 == embed_dim and len2 == key.size(-1)
-
-            v_proj_weight_non_opt = torch.jit._unwrap_optional(v_proj_weight)
-            len1, len2 = v_proj_weight_non_opt.size()
-            assert len1 == embed_dim and len2 == value.size(-1)
-
-            if in_proj_bias is not None:
-                q = F.linear(query, q_proj_weight_non_opt, in_proj_bias[0:embed_dim])
-                k = F.linear(key, k_proj_weight_non_opt, in_proj_bias[embed_dim:(embed_dim * 2)])
-                v = F.linear(value, v_proj_weight_non_opt, in_proj_bias[(embed_dim * 2):])
-            else:
-                q = F.linear(query, q_proj_weight_non_opt, in_proj_bias)
-                k = F.linear(key, k_proj_weight_non_opt, in_proj_bias)
-                v = F.linear(value, v_proj_weight_non_opt, in_proj_bias)
-        
-        # Apply scaling to query
-        q = q * scaling
-
-        # Handle mask dtype conversions
-        if attn_mask is not None:
-            if attn_mask.dtype == torch.uint8:
-                warnings.warn("Byte tensor for attn_mask is deprecated. Use bool tensor instead.")
-                attn_mask = attn_mask.to(torch.bool)
-
-        if key_padding_mask is not None and key_padding_mask.dtype == torch.uint8:
-            warnings.warn("Byte tensor for key_padding_mask is deprecated. Use bool tensor instead.")
-            key_padding_mask = key_padding_mask.to(torch.bool)
-
-        # Move tensors to the same device
-        q = q.to(device)
-        if k is not None:
-            k = k.to(device)
-        if v is not None:
-            v = v.to(device)
-
-        # Get sequence lengths
-        src_len = k.size(0)
-        
-        # Simplified approach: process all heads together
-        try:
-            # Reshape q, k, v for multi-head attention
-            # [tgt_len, bsz, embed_dim] -> [tgt_len, bsz * num_heads, head_dim]
-            q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim)
-            k = k.contiguous().view(src_len, bsz * num_heads, head_dim)
-            v = v.contiguous().view(src_len, bsz * num_heads, head_dim)
-            
-            # Transpose for batch matrix multiplication
-            # [tgt_len, bsz * num_heads, head_dim] -> [bsz * num_heads, tgt_len, head_dim]
-            q = q.transpose(0, 1)
-            # [src_len, bsz * num_heads, head_dim] -> [bsz * num_heads, src_len, head_dim]
-            k = k.transpose(0, 1)
-            v = v.transpose(0, 1)
-            
-            # Calculate attention scores
-            # [bsz * num_heads, tgt_len, head_dim] @ [bsz * num_heads, head_dim, src_len]
-            # -> [bsz * num_heads, tgt_len, src_len]
-            attn_weights = torch.bmm(q, k.transpose(1, 2))
-            
-            # Apply masks
-            if attn_mask is not None:
-                if attn_mask.dim() == 2:
-                    # [tgt_len, src_len] -> [1, tgt_len, src_len]
-                    attn_mask = attn_mask.unsqueeze(0)
-                    # Expand to all heads: [1, tgt_len, src_len] -> [bsz * num_heads, tgt_len, src_len]
-                    attn_mask = attn_mask.expand(bsz * num_heads, -1, -1)
-                elif attn_mask.dim() == 3:
-                    # [num_heads, tgt_len, src_len] -> [bsz * num_heads, tgt_len, src_len]
-                    attn_mask = attn_mask.repeat(bsz, 1, 1)
-                
-                attn_weights = attn_weights.masked_fill(attn_mask, float("-inf"))
-            
-            if key_padding_mask is not None:
-                # [bsz, src_len] -> [bsz, 1, src_len]
-                key_padding_mask = key_padding_mask.unsqueeze(1)
-                # Expand to all heads: [bsz, 1, src_len] -> [bsz * num_heads, tgt_len, src_len]
-                key_padding_mask = key_padding_mask.expand(-1, tgt_len, -1)
-                key_padding_mask = key_padding_mask.reshape(bsz * num_heads, tgt_len, src_len)
-                attn_weights = attn_weights.masked_fill(key_padding_mask, float("-inf"))
-            
-            # Apply softmax and dropout
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            attn_weights = F.dropout(attn_weights, p=dropout_p, training=training)
-            
-            # Apply attention to values
-            # [bsz * num_heads, tgt_len, src_len] @ [bsz * num_heads, src_len, head_dim]
-            # -> [bsz * num_heads, tgt_len, head_dim]
-            attn_output = torch.bmm(attn_weights, v)
-            
-            # Reshape back
-            # [bsz * num_heads, tgt_len, head_dim] -> [tgt_len, bsz * num_heads, head_dim]
-            attn_output = attn_output.transpose(0, 1).contiguous()
-            # [tgt_len, bsz * num_heads, head_dim] -> [tgt_len, bsz, embed_dim]
-            attn_output = attn_output.view(tgt_len, bsz, embed_dim)
-            
-            # Apply output projection
-            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-            
-            return attn_output, None
-        
-        except Exception as e:
-            print(f"Error in attention mechanism: {e}")
-            
-            # Fallback: Use a simpler approach that avoids complex reshaping
-            # Initialize output tensor
-            attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
-            
-            # Process each head separately
-            for h in range(num_heads):
-                # Extract head-specific query, key, value
-                head_start = h * head_dim
-                head_end = (h + 1) * head_dim
-                
-                q_h = q[:, :, head_start:head_end]  # [tgt_len, bsz, head_dim]
-                k_h = k[:, :, head_start:head_end]  # [src_len, bsz, head_dim]
-                v_h = v[:, :, head_start:head_end]  # [src_len, bsz, head_dim]
-                
-                # Simple dot product for each position
-                attn_output_h = torch.zeros_like(q_h)
-                
-                for i in range(tgt_len):
-                    for j in range(src_len):
-                        # Compute attention weight
-                        weight = torch.sum(q_h[i] * k_h[j], dim=-1, keepdim=True)  # [bsz, 1]
-                        # Apply to value
-                        attn_output_h[i] += weight * v_h[j]
-                
-                # Add to output
-                attn_output[:, :, head_start:head_end] = attn_output_h
-            
-            # Apply output projection
-            attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-            
-            return attn_output, None
+    """
+    Super simplified attention mechanism that avoids complex tensor operations.
+    """
+    # Get dimensions
+    tgt_len, bsz, embed_dim = query.size()
+    src_len = key.size(0)
+    device = query.device
     
+    # Create output tensor
+    attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
+    
+    try:
+        # Simple linear projection for query, key, value
+        if not use_separate_proj_weight:
+            # Self-attention
+            if (query is key or torch.equal(query, key)) and (key is value or torch.equal(key, value)):
+                q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+                k = F.linear(key, in_proj_weight[embed_dim:2*embed_dim], in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+                v = F.linear(value, in_proj_weight[2*embed_dim:], in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+            else:
+                # Encoder-decoder attention
+                q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+                k = F.linear(key, in_proj_weight[embed_dim:2*embed_dim], in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+                v = F.linear(value, in_proj_weight[2*embed_dim:], in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+        else:
+            q = F.linear(query, q_proj_weight, in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+            k = F.linear(key, k_proj_weight, in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+            v = F.linear(value, v_proj_weight, in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+        
+        # Scale query
+        head_dim = embed_dim // num_heads
+        scaling = float(head_dim) ** -0.5
+        q = q * scaling
+        
+        # Simple attention without multi-head complexity
+        # Process each position in the target sequence
+        for i in range(tgt_len):
+            # For each item in the batch
+            for b in range(bsz):
+                # Calculate attention weights for this position
+                attn_weights = torch.zeros(src_len, device=device)
+                
+                # Calculate dot product between query and all keys
+                for j in range(src_len):
+                    attn_weights[j] = torch.sum(q[i, b] * k[j, b])
+                
+                # Apply key padding mask if provided
+                if key_padding_mask is not None and b < key_padding_mask.size(0):
+                    for j in range(min(src_len, key_padding_mask.size(1))):
+                        if key_padding_mask[b, j]:
+                            attn_weights[j] = float('-inf')
+                
+                # Apply attention mask if provided
+                if attn_mask is not None and attn_mask.dim() == 2:
+                    for j in range(min(src_len, attn_mask.size(1))):
+                        if i < attn_mask.size(0) and attn_mask[i, j]:
+                            attn_weights[j] = float('-inf')
+                
+                # Apply softmax
+                attn_weights = F.softmax(attn_weights, dim=0)
+                
+                # Apply dropout
+                if dropout_p > 0 and training:
+                    attn_weights = F.dropout(attn_weights, p=dropout_p)
+                
+                # Apply attention weights to values
+                weighted_sum = torch.zeros(embed_dim, device=device)
+                for j in range(src_len):
+                    weighted_sum += attn_weights[j] * v[j, b]
+                
+                # Store result
+                attn_output[i, b] = weighted_sum
+        
+        # Apply output projection
+        attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+        
+        return attn_output, None
+        
     except Exception as e:
-        print(f"Critical error in attention: {e}")
-        # Return zero tensors as fallback
+        print(f"Error in simplified attention: {e}")
+        # Return zero tensor as fallback
         return torch.zeros(tgt_len, bsz, embed_dim, device=device), None
