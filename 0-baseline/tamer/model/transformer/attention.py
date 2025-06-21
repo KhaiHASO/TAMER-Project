@@ -350,64 +350,77 @@ def multi_head_attention_forward(
 
         # Get sequence lengths
         src_len = k.size(0)
-
-        # Use a simpler approach that avoids reshaping complexities
-        # Process each head separately to avoid batch size mismatches
         
         # Initialize output tensor
         attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
         
-        # Process one head at a time to avoid batch size mismatches
-        for h in range(num_heads):
-            # Extract head-specific query, key, value
-            head_start = h * head_dim
-            head_end = (h + 1) * head_dim
-            
-            q_h = q[:, :, head_start:head_end]  # [tgt_len, bsz, head_dim]
-            k_h = k[:, :, head_start:head_end]  # [src_len, bsz, head_dim]
-            v_h = v[:, :, head_start:head_end]  # [src_len, bsz, head_dim]
-            
-            # Transpose for bmm
-            q_h = q_h.transpose(0, 1)  # [bsz, tgt_len, head_dim]
-            k_h = k_h.transpose(0, 1)  # [bsz, src_len, head_dim]
-            v_h = v_h.transpose(0, 1)  # [bsz, src_len, head_dim]
-            
-            # Calculate attention scores
-            try:
-                # [bsz, tgt_len, src_len]
-                attn_weights_h = torch.bmm(q_h, k_h.transpose(1, 2))
+        # Process attention without using bmm to avoid batch size mismatches
+        # Split the embeddings into heads
+        q_heads = q.view(tgt_len, bsz, num_heads, head_dim)
+        k_heads = k.view(src_len, bsz, num_heads, head_dim)
+        v_heads = v.view(src_len, bsz, num_heads, head_dim)
+        
+        # Process each batch separately
+        for b in range(bsz):
+            # Process each head separately
+            for h in range(num_heads):
+                # Extract head-specific query, key, value for this batch
+                q_bh = q_heads[:, b, h, :]  # [tgt_len, head_dim]
+                k_bh = k_heads[:, b, h, :]  # [src_len, head_dim]
+                v_bh = v_heads[:, b, h, :]  # [src_len, head_dim]
+                
+                # Calculate attention scores manually
+                # [tgt_len, src_len]
+                attn_weights_bh = torch.zeros(tgt_len, src_len, device=device)
+                
+                # Compute dot products manually
+                for i in range(tgt_len):
+                    for j in range(src_len):
+                        attn_weights_bh[i, j] = torch.dot(q_bh[i], k_bh[j])
                 
                 # Apply masks if needed
+                if key_padding_mask is not None and b < key_padding_mask.size(0):
+                    # Apply key padding mask for this batch
+                    mask_b = key_padding_mask[b]  # [src_len]
+                    for i in range(tgt_len):
+                        for j in range(min(src_len, mask_b.size(0))):
+                            if mask_b[j]:
+                                attn_weights_bh[i, j] = float('-inf')
+                
+                # Apply attention mask if provided
                 if attn_mask is not None:
                     if attn_mask.dim() == 2:
-                        attn_mask_h = attn_mask.unsqueeze(0)  # [1, tgt_len, src_len]
-                    else:
-                        attn_mask_h = attn_mask[h::num_heads]  # Extract relevant part
-                    
-                    if attn_mask_h.shape[-2:] == attn_weights_h.shape[-2:]:
-                        attn_weights_h = attn_weights_h.masked_fill(attn_mask_h, float("-inf"))
+                        # [tgt_len, src_len]
+                        for i in range(min(tgt_len, attn_mask.size(0))):
+                            for j in range(min(src_len, attn_mask.size(1))):
+                                if attn_mask[i, j]:
+                                    attn_weights_bh[i, j] = float('-inf')
+                    elif attn_mask.dim() == 3 and h < attn_mask.size(0):
+                        # [num_heads, tgt_len, src_len]
+                        for i in range(min(tgt_len, attn_mask.size(1))):
+                            for j in range(min(src_len, attn_mask.size(2))):
+                                if attn_mask[h, i, j]:
+                                    attn_weights_bh[i, j] = float('-inf')
                 
-                if key_padding_mask is not None:
-                    # [bsz, 1, src_len]
-                    key_padding_mask_h = key_padding_mask.unsqueeze(1)
-                    attn_weights_h = attn_weights_h.masked_fill(key_padding_mask_h, float("-inf"))
+                # Apply softmax
+                attn_weights_bh = F.softmax(attn_weights_bh, dim=-1)
                 
-                # Apply softmax and dropout
-                attn_weights_h = F.softmax(attn_weights_h, dim=-1)
-                attn_weights_h = F.dropout(attn_weights_h, p=dropout_p, training=training)
+                # Apply dropout
+                if dropout_p > 0 and training:
+                    attn_weights_bh = F.dropout(attn_weights_bh, p=dropout_p)
                 
-                # Apply attention to values
-                # [bsz, tgt_len, head_dim]
-                attn_output_h = torch.bmm(attn_weights_h, v_h)
+                # Apply attention to values manually
+                # [tgt_len, head_dim]
+                attn_output_bh = torch.zeros(tgt_len, head_dim, device=device)
                 
-                # Transpose back and add to output
-                attn_output_h = attn_output_h.transpose(0, 1)  # [tgt_len, bsz, head_dim]
-                attn_output[:, :, head_start:head_end] = attn_output_h
+                for i in range(tgt_len):
+                    for j in range(src_len):
+                        attn_output_bh[i] += attn_weights_bh[i, j] * v_bh[j]
                 
-            except RuntimeError as e:
-                print(f"Error processing head {h}: {e}")
-                # Create zeros for this head
-                attn_output[:, :, head_start:head_end] = torch.zeros(tgt_len, bsz, head_dim, device=device)
+                # Add to output tensor
+                start_idx = h * head_dim
+                end_idx = (h + 1) * head_dim
+                attn_output[:, b, start_idx:end_idx] = attn_output_bh
         
         # Apply output projection
         try:
@@ -417,11 +430,8 @@ def multi_head_attention_forward(
             # Fallback: create zero tensor with correct shape
             attn_output = torch.zeros(tgt_len, bsz, out_proj_weight.shape[0], device=device)
 
-        if need_weights:
-            # For simplicity, return None for weights since we processed heads separately
-            return attn_output, None
-        else:
-            return attn_output, None
+        # We don't return attention weights since we calculated them per batch/head
+        return attn_output, None
     
     except Exception as e:
         print(f"Error in multi-head attention: {e}")
