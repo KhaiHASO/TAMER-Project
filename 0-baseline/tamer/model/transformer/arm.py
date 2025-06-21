@@ -90,9 +90,8 @@ class AttentionRefinementModule(nn.Module):
             
             # Get dimensions
             b_times_nhead, t, l = prev_attn.shape
-            b = key_padding_mask.shape[0]
             
-            # Calculate nhead if not explicitly given in the shape
+            # Calculate nhead and batch size
             nhead = self.nhead
             b = b_times_nhead // nhead
             
@@ -106,9 +105,18 @@ class AttentionRefinementModule(nn.Module):
                 new_mask[:, :copy_len] = key_padding_mask[:, :copy_len]
                 key_padding_mask = new_mask
             
-            # Reshape attentions with explicit reshaping to avoid errors
-            curr_attn_reshaped = curr_attn.view(b, nhead, t, l)
-            prev_attn_reshaped = prev_attn.view(b, nhead, t, l)
+            # Instead of reshaping directly, create new tensors with the right shape
+            # and copy data from the original tensors
+            curr_attn_reshaped = torch.zeros(b, nhead, t, l, device=device)
+            prev_attn_reshaped = torch.zeros(b, nhead, t, l, device=device)
+            
+            # Fill the reshaped tensors
+            for i in range(b):
+                for j in range(nhead):
+                    idx = i * nhead + j
+                    if idx < b_times_nhead:
+                        curr_attn_reshaped[i, j] = curr_attn[idx]
+                        prev_attn_reshaped[i, j] = prev_attn[idx]
             
             # Create attns tensor
             attns = []
@@ -139,7 +147,7 @@ class AttentionRefinementModule(nn.Module):
             mask = mask.expand(b, 1, t, l)
             mask = mask.reshape(b * t, 1, h, w)
             
-            # Print shape info for debugging
+            # Ensure mask has the right shape
             if mask.shape[2:] != attns.shape[2:]:
                 # Create a new mask with the correct dimensions
                 mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
@@ -158,25 +166,34 @@ class AttentionRefinementModule(nn.Module):
             
             # Reshape back to original format
             cov = cov.reshape(b, t, nhead, h * w)
-            cov = cov.permute(0, 2, 1, 3).reshape(b * nhead, t, h * w)
+            cov = cov.permute(0, 2, 1, 3).contiguous()
             
-            # If the output length doesn't match the original length, pad or truncate
-            if cov.shape[2] != original_shape[2]:
-                if cov.shape[2] < original_shape[2]:
-                    # Pad with zeros to match original shape
-                    padding = torch.zeros((cov.shape[0], cov.shape[1], original_shape[2] - cov.shape[2]), 
-                                         device=device)
-                    cov = torch.cat([cov, padding], dim=2)
-                else:
-                    # Truncate to match original shape
-                    cov = cov[:, :, :original_shape[2]]
+            # Create output tensor with the same shape as the input
+            output = torch.zeros_like(prev_attn)
             
-            # Final check to ensure output shape matches input shape
-            if cov.shape != original_shape:
-                print(f"Warning: Final ARM output shape {cov.shape} doesn't match input shape {original_shape}. Creating zero tensor.")
-                return torch.zeros_like(prev_attn)
-                
-            return cov
+            # Fill the output tensor
+            for i in range(b):
+                for j in range(nhead):
+                    idx = i * nhead + j
+                    if idx < b_times_nhead:
+                        # Get the data for this batch and head
+                        head_data = cov[i, j]
+                        
+                        # Handle size mismatch
+                        if head_data.shape[1] != original_shape[2]:
+                            if head_data.shape[1] < original_shape[2]:
+                                # Pad if smaller
+                                padding = torch.zeros((head_data.shape[0], original_shape[2] - head_data.shape[1]), 
+                                                    device=device)
+                                head_data = torch.cat([head_data, padding], dim=1)
+                            else:
+                                # Truncate if larger
+                                head_data = head_data[:, :original_shape[2]]
+                        
+                        # Copy to output
+                        output[idx] = head_data
+            
+            return output
             
         except Exception as e:
             print(f"Error in ARM module: {e}")

@@ -364,29 +364,36 @@ def multi_head_attention_forward(
         if v is not None:
             v = v.to(device)
 
-        # Reshape for multi-head attention
+        # Safe reshaping for multi-head attention
         try:
-            # Reshape q, k, v for multihead attention
-            q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
-            if k is not None:
-                k = k.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
-            if v is not None:
-                v = v.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
+            # First approach: standard reshape
+            q_reshaped = q.reshape(tgt_len, bsz, num_heads, head_dim).permute(1, 2, 0, 3).contiguous()
+            q_reshaped = q_reshaped.view(bsz * num_heads, tgt_len, head_dim)
+            
+            src_len = k.size(0)
+            k_reshaped = k.reshape(src_len, bsz, num_heads, head_dim).permute(1, 2, 0, 3).contiguous()
+            k_reshaped = k_reshaped.view(bsz * num_heads, src_len, head_dim)
+            
+            v_reshaped = v.reshape(src_len, bsz, num_heads, head_dim).permute(1, 2, 0, 3).contiguous()
+            v_reshaped = v_reshaped.view(bsz * num_heads, src_len, head_dim)
+            
+            q, k, v = q_reshaped, k_reshaped, v_reshaped
         except RuntimeError as e:
             print(f"Error in reshaping q,k,v: {e}")
-            # Try alternative reshaping approach
-            q = q.contiguous().view(tgt_len, bsz, num_heads, head_dim)
-            q = q.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, tgt_len, head_dim)
+            # Second approach: manual reshaping
+            q_flat = q.reshape(tgt_len * bsz, embed_dim)
+            k_flat = k.reshape(src_len * bsz, embed_dim)
+            v_flat = v.reshape(src_len * bsz, embed_dim)
             
-            if k is not None:
-                src_len = k.size(0)
-                k = k.contiguous().view(src_len, bsz, num_heads, head_dim)
-                k = k.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, src_len, head_dim)
+            # Split into heads
+            q_heads = q_flat.view(tgt_len, bsz, num_heads, head_dim)
+            k_heads = k_flat.view(src_len, bsz, num_heads, head_dim)
+            v_heads = v_flat.view(src_len, bsz, num_heads, head_dim)
             
-            if v is not None:
-                src_len = v.size(0)
-                v = v.contiguous().view(src_len, bsz, num_heads, head_dim)
-                v = v.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, src_len, head_dim)
+            # Transpose for attention
+            q = q_heads.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, tgt_len, head_dim)
+            k = k_heads.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, src_len, head_dim)
+            v = v_heads.permute(1, 2, 0, 3).contiguous().view(bsz * num_heads, src_len, head_dim)
 
         # Handle static k and v
         if static_k is not None:
@@ -527,12 +534,22 @@ def multi_head_attention_forward(
         
         # Reshape output
         try:
-            attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
-        except RuntimeError as e:
-            print(f"Error in reshaping output: {e}")
-            # Try alternative reshaping approach
+            # First approach: standard reshape
             attn_output = attn_output.view(bsz, num_heads, tgt_len, head_dim)
             attn_output = attn_output.permute(2, 0, 1, 3).contiguous().view(tgt_len, bsz, embed_dim)
+        except RuntimeError as e:
+            print(f"Error in reshaping output: {e}")
+            # Second approach: manual reshaping
+            attn_output_flat = attn_output.view(bsz, num_heads, tgt_len, head_dim)
+            attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
+            
+            # Manually combine heads
+            for t in range(tgt_len):
+                for b in range(bsz):
+                    for h in range(num_heads):
+                        start_idx = h * head_dim
+                        end_idx = (h + 1) * head_dim
+                        attn_output[t, b, start_idx:end_idx] = attn_output_flat[b, h, t]
         
         # Apply output projection
         try:
@@ -560,4 +577,4 @@ def multi_head_attention_forward(
         # Return zero tensors as fallback
         attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
         attention = torch.zeros(bsz * num_heads, tgt_len, src_len, device=device) if need_weights else None
-        return attn_output, attention
+        return attn_output, None
