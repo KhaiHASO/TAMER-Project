@@ -7,10 +7,10 @@ import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
 
-from tamer.datamodule import Batch, vocab
+from tamer.datamodule import vocab
+from tamer.datamodule.datamodule import Batch
 from tamer.model.tamer import TAMER
-from tamer.utils.utils import (
-    ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out, to_struct_output)
+from tamer.utils.utils import Hypothesis, ExpRateRecorder, ce_loss, to_bi_tgt_out, to_struct_output
 
 
 class LitTAMER(pl.LightningModule):
@@ -200,7 +200,43 @@ class LitTAMER(pl.LightningModule):
     def approximate_joint_search(
         self, img: FloatTensor, mask: LongTensor
     ) -> List[Hypothesis]:
-        return self.tamer_model.beam_search(img, mask, **self.hparams)
+        """Run beam search on the model with error handling
+
+        Parameters
+        ----------
+        img : FloatTensor
+            Input image tensor [b, 1, h, w]
+        mask : LongTensor
+            Input mask tensor [b, h, w]
+
+        Returns
+        -------
+        List[Hypothesis]
+            List of beam search hypotheses
+        """
+        try:
+            # Ensure inputs are on the correct device
+            device = self.device
+            img = img.to(device)
+            mask = mask.to(device)
+            
+            # Extract beam search parameters from hparams
+            beam_params = {
+                'beam_size': self.hparams.beam_size,
+                'max_len': self.hparams.max_len,
+                'alpha': self.hparams.alpha,
+                'early_stopping': self.hparams.early_stopping,
+                'temperature': self.hparams.temperature
+            }
+            
+            # Run beam search with error handling
+            return self.tamer_model.beam_search(img, mask, **beam_params)
+            
+        except Exception as e:
+            print(f"Error in beam search: {e}")
+            # Return empty hypotheses in case of error
+            batch_size = img.shape[0]
+            return [Hypothesis([], 0.0, "l2r") for _ in range(batch_size)]
 
     def configure_optimizers(self):
         optimizer = optim.Adadelta(

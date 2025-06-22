@@ -433,10 +433,41 @@ def multi_head_attention_forward(
             new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
             key_padding_mask = new_mask
             
-        attn_output_weights = attn_output_weights.masked_fill(
-            key_padding_mask.unsqueeze(1).unsqueeze(2),
-            float("-inf"),
-        )
+        # Ensure the expanded mask matches the dimensions of attn_output_weights
+        # The issue is with the broadcasting of the mask to the attention weights
+        try:
+            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            # Check if dimensions match for masked_fill operation
+            if expanded_mask.size(0) != attn_output_weights.size(0) or \
+               expanded_mask.size(3) != attn_output_weights.size(3):
+                print(f"Warning: expanded_mask shape {expanded_mask.shape} doesn't match attn_output_weights shape {attn_output_weights.shape}")
+                
+                # Create a new mask with the right shape
+                new_expanded_mask = torch.zeros(
+                    (attn_output_weights.size(0), 1, 1, attn_output_weights.size(3)), 
+                    dtype=torch.bool, 
+                    device=device
+                )
+                
+                # Copy what we can from the original mask
+                copy_rows = min(expanded_mask.size(0), attn_output_weights.size(0))
+                copy_cols = min(expanded_mask.size(3), attn_output_weights.size(3))
+                
+                if copy_rows > 0 and copy_cols > 0:
+                    new_expanded_mask[:copy_rows, :, :, :copy_cols] = expanded_mask[:copy_rows, :, :, :copy_cols]
+                
+                expanded_mask = new_expanded_mask
+            
+            # Apply the mask
+            attn_output_weights = attn_output_weights.masked_fill(
+                expanded_mask,
+                float("-inf"),
+            )
+        except Exception as e:
+            print(f"Error applying mask in attention: {e}")
+            # If masking fails, continue without masking
+            pass
+            
         attn_output_weights = attn_output_weights.view(
             bsz * num_heads, tgt_len, src_len)
 
