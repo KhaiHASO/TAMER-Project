@@ -84,8 +84,7 @@ class LitTAMER(pl.LightningModule):
         # Ensure all batch items are on the same device as the model
         device = self.device
         batch.imgs = batch.imgs.to(device)
-        batch.mask = batch.mask.to(device) 
-        batch.indices = [idx.to(device) for idx in batch.indices]
+        batch.mask = batch.mask.to(device)
         
         tgt, out = to_bi_tgt_out(batch.indices, device)
         struct_out, _ = to_struct_output(batch.indices, device)
@@ -110,7 +109,6 @@ class LitTAMER(pl.LightningModule):
         device = self.device
         batch.imgs = batch.imgs.to(device)
         batch.mask = batch.mask.to(device)
-        batch.indices = [idx.to(device) for idx in batch.indices]
         
         tgt, out = to_bi_tgt_out(batch.indices, device)
         struct_out, _ = to_struct_output(batch.indices, device)
@@ -152,7 +150,6 @@ class LitTAMER(pl.LightningModule):
         device = self.device
         batch.imgs = batch.imgs.to(device)
         batch.mask = batch.mask.to(device)
-        batch.indices = [idx.to(device) for idx in batch.indices]
         
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         self.exprate_recorder([h.seq for h in hyps], batch.indices)

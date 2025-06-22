@@ -112,11 +112,22 @@ def to_tgt_output(
     """
     assert direction in {"l2r", "r2l"}
 
-    if isinstance(tokens[0], list):
-        tokens = [torch.tensor(t, dtype=torch.long, device=device) for t in tokens]
-    else:
-        # Ensure tensors are on the correct device
-        tokens = [t.to(device=device, dtype=torch.long) for t in tokens]
+    # Kiểm tra kiểu dữ liệu của tokens và chuyển đổi nếu cần
+    processed_tokens = []
+    for t in tokens:
+        if isinstance(t, list):
+            processed_tokens.append(torch.tensor(t, dtype=torch.long, device=device))
+        elif isinstance(t, torch.Tensor):
+            processed_tokens.append(t.to(device=device, dtype=torch.long))
+        else:
+            # Nếu không phải list hoặc tensor, cố gắng chuyển đổi thành tensor
+            try:
+                processed_tokens.append(torch.tensor(list(t), dtype=torch.long, device=device))
+            except:
+                # Fallback, tạo một tensor rỗng nếu thất bại
+                processed_tokens.append(torch.tensor([], dtype=torch.long, device=device))
+
+    tokens = processed_tokens
 
     if direction == "l2r":
         tokens = tokens
@@ -130,7 +141,7 @@ def to_tgt_output(
     batch_size = len(tokens)
     lens = [len(t) for t in tokens]
 
-    length = max(lens) + 1
+    length = max(lens) + 1 if lens else 1
     if pad_to_len is not None:
         length = max(length, pad_to_len)
 
@@ -186,27 +197,38 @@ def to_struct_output(
     indices: Union[List[List[int]], List[LongTensor]],
     device: torch.device,
 ) -> LongTensor:
-    if isinstance(indices[0], torch.Tensor):
-        # Ensure tensors are on the correct device
-        indices = [t.to(device=device).tolist() for t in indices]
-    else:
-        indices = [t for t in indices]  # Make a copy to be safe
+    # Chuẩn hóa indices thành list of lists
+    processed_indices = []
+    for idx in indices:
+        if isinstance(idx, torch.Tensor):
+            # Nếu là tensor, chuyển về list
+            processed_indices.append(idx.cpu().tolist() if idx.is_cuda else idx.tolist())
+        elif isinstance(idx, list):
+            # Nếu đã là list, giữ nguyên
+            processed_indices.append(idx)
+        else:
+            # Trường hợp khác, cố gắng chuyển thành list
+            try:
+                processed_indices.append(list(idx))
+            except:
+                processed_indices.append([])
 
     structs = []
     illegal = []
-    for i in range(len(indices)):
+    for i in range(len(processed_indices)):
         try:
-            words = vocab.indices2words(indices[i])
+            words = vocab.indices2words(processed_indices[i])
             r = to_struct(words)
             structs.append(r)
             illegal.append(False)
-        except (AssertionError, IndexError):
-            structs.append([-1 for _ in indices[i]])
+        except (AssertionError, IndexError) as e:
+            # Nếu không thể chuyển đổi, tạo một cấu trúc rỗng
+            structs.append([-1 for _ in processed_indices[i]])
             illegal.append(True)
 
     batch_size = len(structs)
     lens = [len(r) for r in structs]
-    length = max(lens) + 1
+    length = max(lens) + 1 if lens else 1
 
     l2r_out = torch.full(
         (batch_size, length), fill_value=-1, dtype=torch.long, device=device
@@ -216,14 +238,15 @@ def to_struct_output(
     )
 
     for i, struct in enumerate(structs):
-        l2r_out[i, : lens[i]] = torch.tensor(struct, dtype=torch.long, device=device)
-        l2r_out[i, lens[i]] = lens[i] - 1
-        r2l_out[i, : lens[i]] = torch.tensor(
-            [lens[i] - p - 1 if p != -1 else -1 for p in reversed(struct)],
-            dtype=torch.long,
-            device=device,
-        )
-        r2l_out[i, lens[i]] = lens[i] - 1
+        if lens[i] > 0:
+            l2r_out[i, : lens[i]] = torch.tensor(struct, dtype=torch.long, device=device)
+            l2r_out[i, lens[i]] = lens[i] - 1
+            r2l_out[i, : lens[i]] = torch.tensor(
+                [lens[i] - p - 1 if p != -1 else -1 for p in reversed(struct)],
+                dtype=torch.long,
+                device=device,
+            )
+            r2l_out[i, lens[i]] = lens[i] - 1
 
     out = torch.cat((l2r_out, r2l_out), dim=0)
     illegal = torch.tensor(illegal, device=device)
