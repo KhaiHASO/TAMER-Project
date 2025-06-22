@@ -24,6 +24,8 @@ class TAMER(pl.LightningModule):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_size: int = 114,
+        use_gat: bool = False,
+        gat_layers: int = 2,
     ):
         super().__init__()
 
@@ -40,6 +42,8 @@ class TAMER(pl.LightningModule):
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
             vocab_size=vocab_size,
+            use_gat=use_gat,
+            gat_layers=gat_layers,
         )
 
     def forward(

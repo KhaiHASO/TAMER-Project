@@ -8,6 +8,7 @@ from torch import FloatTensor, LongTensor
 from tamer.datamodule import vocab
 from tamer.model.pos_enc import WordPosEnc
 from tamer.model.transformer.arm import AttentionRefinementModule
+from tamer.model.transformer.gat import GATModule
 from tamer.model.transformer.transformer_decoder import (
     TransformerDecoder,
     TransformerDecoderLayer,
@@ -68,6 +69,44 @@ class StructSim(nn.Module):
         r2l_sim = self.r2l_struct_sim(r2l_out, r2l_kp_mask)
 
         return torch.cat((l2r_sim, r2l_sim), dim=0)
+
+
+class GATStructSim(nn.Module):
+    """GAT-based replacement for StructSim"""
+    def __init__(self, d_model, num_layers=2, nhead=8):
+        super().__init__()
+        self.l2r_gat = GATModule(d_model, nhead=nhead, num_layers=num_layers)
+        self.r2l_gat = GATModule(d_model, nhead=nhead, num_layers=num_layers)
+        
+        # Similarity computation layers
+        self.to_q = nn.Linear(d_model, d_model)
+        self.to_k = nn.Linear(d_model, d_model)
+        self.to_sim = nn.Sequential(nn.ReLU(inplace=True), nn.Linear(d_model, 1))
+    
+    def forward(self, out, src_key_padding_mask):
+        l2r_out, r2l_out = torch.chunk(out, 2, dim=1)
+        l2r_kp_mask, r2l_kp_mask = torch.chunk(src_key_padding_mask, 2, dim=0)
+        
+        # Apply GAT to each direction
+        l2r_out = self.l2r_gat(l2r_out, l2r_kp_mask)
+        r2l_out = self.r2l_gat(r2l_out, r2l_kp_mask)
+        
+        # Compute similarity matrices for each direction
+        l2r_q = self.to_q(l2r_out)
+        l2r_k = self.to_k(l2r_out)
+        l2r_q = rearrange(l2r_q, "t b d -> b t () d")
+        l2r_k = rearrange(l2r_k, "l b d -> b () l d")
+        l2r_sim = self.to_sim(l2r_q + l2r_k).squeeze(-1)
+        l2r_sim = l2r_sim.masked_fill(l2r_kp_mask[:, None, :], float("-inf"))
+
+        r2l_q = self.to_q(r2l_out)
+        r2l_k = self.to_k(r2l_out)
+        r2l_q = rearrange(r2l_q, "t b d -> b t () d")
+        r2l_k = rearrange(r2l_k, "l b d -> b () l d")
+        r2l_sim = self.to_sim(r2l_q + r2l_k).squeeze(-1)
+        r2l_sim = r2l_sim.masked_fill(r2l_kp_mask[:, None, :], float("-inf"))
+        
+        return torch.cat((l2r_sim, r2l_sim), dim=0)
     
 
 def _build_transformer_decoder(
@@ -108,6 +147,8 @@ class Decoder(DecodeModel):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_size: int = 114,
+        use_gat: bool = False,
+        gat_layers: int = 2,
     ):
         super().__init__()
 
@@ -130,7 +171,12 @@ class Decoder(DecodeModel):
             self_coverage=self_coverage,
         )
         self.proj = nn.Linear(d_model, vocab_size)
-        self.struct_sim = StructSim(d_model)
+        
+        # Use either GAT or original StructSim module
+        if use_gat:
+            self.struct_sim = GATStructSim(d_model, num_layers=gat_layers, nhead=nhead)
+        else:
+            self.struct_sim = StructSim(d_model)
 
 
     def _build_attention_mask(self, length):
