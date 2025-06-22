@@ -7,100 +7,154 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops.einops import rearrange
 from torch import FloatTensor, LongTensor
-import timm
-import cv2
-import torchvision.transforms as T
 
 from .pos_enc import ImgPosEnc
 
 
-class VisionTransformer(nn.Module):
+# DenseNet-B
+class _Bottleneck(nn.Module):
+    def __init__(self, n_channels: int, growth_rate: int, use_dropout: bool):
+        super(_Bottleneck, self).__init__()
+        interChannels = 4 * growth_rate
+        self.bn1 = nn.BatchNorm2d(interChannels)
+        self.conv1 = nn.Conv2d(n_channels, interChannels,
+                               kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(growth_rate)
+        self.conv2 = nn.Conv2d(
+            interChannels, growth_rate, kernel_size=3, padding=1, bias=False
+        )
+        self.use_dropout = use_dropout
+        self.dropout = nn.Dropout(p=0.2)
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = F.relu(self.bn2(self.conv2(out)), inplace=True)
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = torch.cat((x, out), 1)
+        return out
+
+
+# single layer
+class _SingleLayer(nn.Module):
+    def __init__(self, n_channels: int, growth_rate: int, use_dropout: bool):
+        super(_SingleLayer, self).__init__()
+        self.bn1 = nn.BatchNorm2d(n_channels)
+        self.conv1 = nn.Conv2d(
+            n_channels, growth_rate, kernel_size=3, padding=1, bias=False
+        )
+        self.use_dropout = use_dropout
+        self.dropout = nn.Dropout(p=0.2)
+
+    def forward(self, x):
+        out = self.conv1(F.relu(x, inplace=True))
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = torch.cat((x, out), 1)
+        return out
+
+
+# transition layer
+class _Transition(nn.Module):
+    def __init__(self, n_channels: int, n_out_channels: int, use_dropout: bool):
+        super(_Transition, self).__init__()
+        self.bn1 = nn.BatchNorm2d(n_out_channels)
+        self.conv1 = nn.Conv2d(n_channels, n_out_channels,
+                               kernel_size=1, bias=False)
+        self.use_dropout = use_dropout
+        self.dropout = nn.Dropout(p=0.2)
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = F.avg_pool2d(out, 2, ceil_mode=True)
+        return out
+
+
+class DenseNet(nn.Module):
     def __init__(
         self,
-        img_size: int = 224,
-        patch_size: int = 16,
-        in_chans: int = 1,
-        embed_dim: int = 768,
-        depth: int = 12,
-        num_heads: int = 12,
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
-        drop_rate: float = 0.0,
-        attn_drop_rate: float = 0.0,
-        drop_path_rate: float = 0.0,
+        growth_rate: int,
+        num_layers: int,
+        reduction: float = 0.5,
+        bottleneck: bool = True,
+        use_dropout: bool = True,
     ):
-        super().__init__()
-        
-        # Load ViT model với pretrained=False để tránh lỗi mismatch
-        self.vit = timm.create_model(
-            'vit_base_patch16_224',
-            pretrained=False,  # Để False vì dùng custom cấu hình
-            img_size=img_size,
-            patch_size=patch_size,
-            in_chans=in_chans,
-            embed_dim=embed_dim,
-            depth=depth,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            qkv_bias=qkv_bias,
-            drop_rate=drop_rate,
-            attn_drop_rate=attn_drop_rate,
-            drop_path_rate=drop_path_rate,
+        super(DenseNet, self).__init__()
+        n_dense_blocks = num_layers
+        n_channels = 2 * growth_rate
+        self.conv1 = nn.Conv2d(
+            1, n_channels, kernel_size=7, padding=3, stride=2, bias=False
         )
-        
-        # Remove classification head
-        self.vit.head = nn.Identity()
-        
-        self.out_channels = embed_dim
+        self.norm1 = nn.BatchNorm2d(n_channels)
+        self.dense1 = self._make_dense(
+            n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout
+        )
+        n_channels += n_dense_blocks * growth_rate
+        n_out_channels = int(math.floor(n_channels * reduction))
+        self.trans1 = _Transition(n_channels, n_out_channels, use_dropout)
+
+        n_channels = n_out_channels
+        self.dense2 = self._make_dense(
+            n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout
+        )
+        n_channels += n_dense_blocks * growth_rate
+        n_out_channels = int(math.floor(n_channels * reduction))
+        self.trans2 = _Transition(n_channels, n_out_channels, use_dropout)
+
+        n_channels = n_out_channels
+        self.dense3 = self._make_dense(
+            n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout
+        )
+
+        self.out_channels = n_channels + n_dense_blocks * growth_rate
+        self.post_norm = nn.BatchNorm2d(self.out_channels)
+
+    @staticmethod
+    def _make_dense(n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout):
+        layers = []
+        for _ in range(int(n_dense_blocks)):
+            if bottleneck:
+                layers.append(_Bottleneck(
+                    n_channels, growth_rate, use_dropout))
+            else:
+                layers.append(_SingleLayer(
+                    n_channels, growth_rate, use_dropout))
+            n_channels += growth_rate
+        return nn.Sequential(*layers)
 
     def forward(self, x, x_mask):
-        # ViT expects input in format [B, C, H, W]
-        # Get features from ViT
-        features = self.vit.forward_features(x)
-        
-        # Reshape features to match expected format
-        # ViT outputs [B, N, C] where N = (H/P) * (W/P)
-        # We need to reshape to [B, H/P, W/P, C]
-        B, N, C = features.shape
-        
-        # Tính toán đúng kích thước H, W dựa trên số patch thực tế
-        # N = (H/P) * (W/P) = (224/16) * (224/16) = 14 * 14 = 196
-        # Nhưng có thể có thêm 1 patch cho cls_token
-        if N == 197:  # 196 + 1 (cls_token)
-            H = W = 14
-            # Bỏ qua cls_token, chỉ lấy patch tokens
-            features = features[:, 1:, :]  # Remove cls_token
-        elif N == 196:  # Chỉ có patch tokens
-            H = W = 14
-        else:
-            # Fallback: tính toán dựa trên sqrt
-        H = W = int(math.sqrt(N))
-        
-        features = features.reshape(B, H, W, C)
-        
-        # Update mask to match new dimensions
-        out_mask = x_mask[:, ::16, ::16]  # Assuming patch_size=16
-        
-        return features, out_mask
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out_mask = x_mask[:, 0::2, 0::2]
+        out = F.relu(out, inplace=True)
+        out = F.max_pool2d(out, 2, ceil_mode=True)
+        out_mask = out_mask[:, 0::2, 0::2]
+        out = self.dense1(out)
+        out = self.trans1(out)
+        out_mask = out_mask[:, 0::2, 0::2]
+        out = self.dense2(out)
+        out = self.trans2(out)
+        out_mask = out_mask[:, 0::2, 0::2]
+        out = self.dense3(out)
+        out = self.post_norm(out)
+        return out, out_mask
 
 
 class Encoder(pl.LightningModule):
     def __init__(self, d_model: int, growth_rate: int, num_layers: int):
         super().__init__()
 
-        # Initialize ViT
-        self.model = VisionTransformer(
-            img_size=224,  # Adjust based on your input size
-            patch_size=16,
-            in_chans=1,
-            embed_dim=d_model,  # Use d_model as embed_dim
-            depth=num_layers,  # Use num_layers as depth
-            num_heads=8,  # Use 8 heads as in original config
-            mlp_ratio=4.0,
-            drop_rate=0.3,  # Use dropout from config
-        )
+        self.model = DenseNet(growth_rate=growth_rate, num_layers=num_layers)
+
+        self.feature_proj = nn.Conv2d(
+            self.model.out_channels, d_model, kernel_size=1)
 
         self.pos_enc_2d = ImgPosEnc(d_model, normalize=True)
+
         self.norm = nn.LayerNorm(d_model)
 
     def forward(
@@ -122,9 +176,14 @@ class Encoder(pl.LightningModule):
         """
         # extract feature
         feature, mask = self.model(img, img_mask)
+        feature = self.feature_proj(feature)
+
+        # proj
+        feature = rearrange(feature, "b d h w -> b h w d")
 
         # positional encoding
         feature = self.pos_enc_2d(feature, mask)
         feature = self.norm(feature)
 
+        # flat to 1-D
         return feature, mask

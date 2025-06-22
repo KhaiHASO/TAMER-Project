@@ -1,6 +1,11 @@
 seed_everything: 7
 trainer:
   checkpoint_callback: true
+  logger:
+    class_path: pytorch_lightning.loggers.CSVLogger
+    init_args:
+      save_dir: lightning_logs
+      name: .
   callbacks:
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
       init_args:
@@ -14,8 +19,9 @@ trainer:
   gpus: 1
   accelerator: auto
   check_val_every_n_epoch: 2
-  max_epochs: 400
+  max_epochs: 100
   deterministic: true
+  precision: 16
 model:
   d_model: 256
   # encoder
@@ -32,7 +38,7 @@ model:
   self_coverage: true
   # beam search
   beam_size: 10
-  max_len: 200
+  max_len: 150
   alpha: 1.0
   early_stopping: false
   temperature: 1.0

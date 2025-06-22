@@ -1,6 +1,5 @@
 import torchvision.transforms as tr
 from torch.utils.data.dataset import Dataset
-import cv2
 
 from .transforms import ScaleAugmentation, ScaleToLimitRange
 
@@ -29,8 +28,6 @@ class HMEDataset(Dataset):
                 ScaleToLimitRange(w_lo=W_LO, w_hi=W_HI, h_lo=H_LO, h_hi=H_HI)
             )
 
-        # Thêm bước resize về 224x224 cho ViT
-        trans_list.append(lambda img: cv2.resize(img, (224, 224)))
         trans_list.append(tr.ToTensor())
         self.transform = tr.Compose(trans_list)
 

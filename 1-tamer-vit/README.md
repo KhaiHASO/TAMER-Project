@@ -66,6 +66,10 @@ Next, navigate to TAMER folder and run `train.py`. It may take **8~9** hours on 
 # train TAMER model using 4 gpus and ddp on CROHME dataset
 python -u train.py --config config/crohme.yaml
 ```
+# debug TAMER overfit batches 1
+```bash
+python -u train.py --config config/crohme.yaml --trainer.overfit_batches=1
+```
 
 For single gpu user, you may change the `config.yaml` file to
 ```yaml
