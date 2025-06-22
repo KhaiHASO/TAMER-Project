@@ -111,13 +111,8 @@ class Decoder(DecodeModel):
     ):
         super().__init__()
 
-        # Create embedding layers
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.layer_norm = nn.LayerNorm(d_model)
-        
-        # Create a sequential container for word embedding
         self.word_embed = nn.Sequential(
-            self.embedding, self.layer_norm
+            nn.Embedding(vocab_size, d_model), nn.LayerNorm(d_model)
         )
 
         self.pos_enc = WordPosEnc(d_model=d_model)
@@ -166,21 +161,10 @@ class Decoder(DecodeModel):
         FloatTensor
             [b, l, vocab_size]
         """
-        # Make sure all inputs are on the same device
-        device = self.device
-        src = src.to(device)
-        src_mask = src_mask.to(device)
-        tgt = tgt.to(device)
-        
-        # Make sure all modules are on the correct device
-        self.to(device)
-        
         _, l = tgt.size()
-        tgt_mask = self._build_attention_mask(l).to(device)
-        tgt_pad_mask = (tgt == vocab.PAD_IDX).to(device)
+        tgt_mask = self._build_attention_mask(l)
+        tgt_pad_mask = tgt == vocab.PAD_IDX
 
-        # Move tgt to device if needed and ensure it's a LongTensor
-        tgt = tgt.to(device=device, dtype=torch.long) 
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]
         tgt = self.norm(tgt)
@@ -209,83 +193,5 @@ class Decoder(DecodeModel):
     def transform(
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
-        """Transform inputs for beam search
-
-        Parameters
-        ----------
-        src : List[FloatTensor]
-            List of source tensors [b, h, w, d]
-        src_mask : List[LongTensor]
-            List of source masks [b, h, w]
-        input_ids : LongTensor
-            Input token ids [b, l]
-
-        Returns
-        -------
-        FloatTensor
-            Output logits and similarity scores
-        """
-        # Safety check for empty lists
-        if not src or not src_mask:
-            print("Warning: Empty src or src_mask list in transform")
-            # Create dummy tensors if needed
-            device = self.device
-            if not src:
-                src = [torch.zeros((1, 1, 1, self.embedding.embedding_dim), device=device)]
-            if not src_mask:
-                src_mask = [torch.zeros((1, 1, 1), dtype=torch.bool, device=device)]
-        
-        # Ensure we have at least one element in each list
-        assert len(src) > 0 and len(src_mask) > 0, "Source or mask lists cannot be empty"
-        
-        # Get the device of the model
-        device = self.device
-        
-        # Safely access the first element of the lists
-        try:
-            # Check if src[0] and src_mask[0] exist and are valid tensors
-            if src[0] is None or src_mask[0] is None:
-                raise ValueError("Source or mask tensor is None")
-                
-            # Move tensors to the correct device
-            src_tensor = src[0].to(device)
-            mask_tensor = src_mask[0].to(device)
-            input_ids = input_ids.to(device)
-            
-            # Call the forward method
-            return self(src_tensor, mask_tensor, input_ids)
-            
-        except (IndexError, ValueError) as e:
-            print(f"Error in transform: {e}")
-            # Create dummy output in case of error
-            batch_size = input_ids.shape[0]
-            seq_len = input_ids.shape[1]
-            vocab_size = self.embedding.num_embeddings
-            
-            # Return dummy tensors with the right shape
-            dummy_out = torch.zeros((batch_size, seq_len, vocab_size), device=device)
-            dummy_sim = torch.zeros((batch_size, seq_len, seq_len), device=device)
-            return dummy_out, dummy_sim
-
-    @property
-    def device(self) -> torch.device:
-        """Get the device of the model"""
-        return next(self.parameters()).device
-        
-    def to(self, device):
-        """Override to method to ensure all modules are moved to the correct device"""
-        super().to(device)
-        if hasattr(self, 'word_embed'):
-            for module in self.word_embed:
-                module.to(device)
-        if hasattr(self, 'pos_enc'):
-            self.pos_enc.to(device)
-        if hasattr(self, 'norm'):
-            self.norm.to(device)
-        if hasattr(self, 'model'):
-            self.model.to(device)
-        if hasattr(self, 'proj'):
-            self.proj.to(device)
-        if hasattr(self, 'struct_sim'):
-            self.struct_sim.to(device)
-        return self
+        assert len(src) == 1 and len(src_mask) == 1
+        return self(src[0], src_mask[0], input_ids)

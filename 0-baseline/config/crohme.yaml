@@ -1,19 +1,18 @@
 seed_everything: 7
 trainer:
-  enable_checkpointing: true
+  checkpoint_callback: true
   callbacks:
-    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
       init_args:
         logging_interval: epoch
-    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
       init_args:
         save_top_k: 1
         monitor: val_ExpRate
         mode: max
         filename: '{epoch}-{step}-{val_ExpRate:.4f}'
-  devices: 1
-  accelerator: cpu
-  #strategy: ddp
+  gpus: 0, 1, 2, 3
+  accelerator: ddp
   check_val_every_n_epoch: 2
   max_epochs: 400
   deterministic: true
@@ -45,7 +44,7 @@ model:
     - 350
 data:
   folder: data/crohme
-  test_folder: "2014"
+  test_folder: 2014
   max_size: 320000
   scale_to_limit: true
   train_batch_size: 8

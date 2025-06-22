@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 from einops import rearrange, repeat
 
@@ -36,11 +36,8 @@ class WordPosEnc(pl.LightningModule):
         torch.Tensor
             [b, l, d]
         """
-        device = x.device
         _, seq_len, _ = x.size()
-        # Get the PE buffer and ensure it's on the right device
-        pe = self.pe.to(device)
-        emb = pe[:seq_len, :]
+        emb = self.pe[:seq_len, :]
         x = x + emb[None, :, :]
         return x
 
@@ -84,10 +81,6 @@ class ImgPosEnc(pl.LightningModule):
         torch.Tensor
             [b, h, w, d]
         """
-        device = x.device
-        # Ensure mask is on the right device
-        mask = mask.to(device)
-        
         not_mask = ~mask
         y_embed = not_mask.cumsum(1, dtype=torch.float32)
         x_embed = not_mask.cumsum(2, dtype=torch.float32)
@@ -97,7 +90,7 @@ class ImgPosEnc(pl.LightningModule):
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
         dim_t = torch.arange(
-            0, self.half_d_model, 2, dtype=torch.float, device=device
+            0, self.half_d_model, 2, dtype=torch.float, device=self.device
         )
         inv_feq = 1.0 / (self.temperature ** (dim_t / self.half_d_model))
 
@@ -149,12 +142,9 @@ class WordRotaryEmbed(pl.LightningModule):
         torch.Tensor
             [b, l, d]
         """
-        device = x.device
         _, n, _ = x.size()
-        t = torch.arange(n, device=device).type_as(self.inv_freq)
-        # Move inv_freq to the same device as x
-        inv_freq = self.inv_freq.to(device)
-        sinusoid_inp = torch.einsum("i, j -> i j", t, inv_freq)
+        t = torch.arange(n, device=self.device).type_as(self.inv_freq)
+        sinusoid_inp = torch.einsum("i, j -> i j", t, self.inv_freq)
         sin, cos = sinusoid_inp.sin(), sinusoid_inp.cos()
 
         sin, cos = map(lambda t: repeat(t, "b n -> b (n j)", j=2), (sin, cos))
@@ -201,10 +191,6 @@ class ImageRotaryEmbed(pl.LightningModule):
         torch.Tensor
             [b, h, w, d]
         """
-        device = x.device
-        # Ensure mask is on the right device
-        mask = mask.to(device)
-        
         not_mask = ~mask
         embed_y = not_mask.cumsum(1, dtype=torch.float32)
         embed_x = not_mask.cumsum(2, dtype=torch.float32)
@@ -214,7 +200,7 @@ class ImageRotaryEmbed(pl.LightningModule):
             embed_x = embed_x / (embed_x[:, :, -1:] + eps) * self.scale
 
         dim_t = torch.arange(
-            0, self.half_d_model, 2, dtype=torch.float, device=device
+            0, self.half_d_model, 2, dtype=torch.float, device=self.device
         )
         inv_feq = 1.0 / (self.temperature ** (dim_t / self.half_d_model))
 

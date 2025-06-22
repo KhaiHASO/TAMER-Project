@@ -2,15 +2,15 @@ import zipfile
 from typing import List
 import editdistance
 import json
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
 
-from tamer.datamodule import vocab
-from tamer.datamodule.datamodule import Batch
+from tamer.datamodule import Batch, vocab
 from tamer.model.tamer import TAMER
-from tamer.utils.utils import Hypothesis, ExpRateRecorder, ce_loss, to_bi_tgt_out, to_struct_output
+from tamer.utils.utils import (
+    ExpRateRecorder, Hypothesis, ce_loss, to_bi_tgt_out, to_struct_output)
 
 
 class LitTAMER(pl.LightningModule):
@@ -81,13 +81,8 @@ class LitTAMER(pl.LightningModule):
         return self.tamer_model(img, img_mask, tgt)
 
     def training_step(self, batch: Batch, _):
-        # Ensure all batch items are on the same device as the model
-        device = self.device
-        batch.imgs = batch.imgs.to(device)
-        batch.mask = batch.mask.to(device)
-        
-        tgt, out = to_bi_tgt_out(batch.indices, device)
-        struct_out, _ = to_struct_output(batch.indices, device)
+        tgt, out = to_bi_tgt_out(batch.indices, self.device)
+        struct_out, _ = to_struct_output(batch.indices, self.device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
@@ -105,13 +100,8 @@ class LitTAMER(pl.LightningModule):
 
 
     def validation_step(self, batch: Batch, _):
-        # Ensure all batch items are on the same device as the model
-        device = self.device
-        batch.imgs = batch.imgs.to(device)
-        batch.mask = batch.mask.to(device)
-        
-        tgt, out = to_bi_tgt_out(batch.indices, device)
-        struct_out, _ = to_struct_output(batch.indices, device)
+        tgt, out = to_bi_tgt_out(batch.indices, self.device)
+        struct_out, _ = to_struct_output(batch.indices, self.device)
         out_hat, sim = self(batch.imgs, batch.mask, tgt)
 
         loss = ce_loss(out_hat, out)
@@ -133,34 +123,28 @@ class LitTAMER(pl.LightningModule):
             sync_dist=True,
         )
 
-        # Run beam search if we're past the initial training epochs
-        if self.current_epoch >= self.hparams.milestones[0]:
-            hyps = self.approximate_joint_search(batch.imgs, batch.mask)
-            self.exprate_recorder([h.seq for h in hyps], batch.indices)
-            self.log(
-                "val_ExpRate",
-                self.exprate_recorder,
-                prog_bar=True,
-                on_step=False,
-                on_epoch=True,
-            )
-        else:
-            # Log a default value when not calculating to avoid ModelCheckpoint error
-            # Use a small value (0) so it won't be mistakenly chosen as the best model
-            self.log(
-                "val_ExpRate",
-                0.0,
-                prog_bar=True,
-                on_step=False,
-                on_epoch=True,
-            )
+        # if self.current_epoch < self.hparams.milestones[0]:
+        #     self.log(
+        #         "val_ExpRate",
+        #         self.exprate_recorder,
+        #         prog_bar=True,
+        #         on_step=False,
+        #         on_epoch=True,
+        #     )
+        #     return
+
+        hyps = self.approximate_joint_search(batch.imgs, batch.mask)
+
+        self.exprate_recorder([h.seq for h in hyps], batch.indices)
+        self.log(
+            "val_ExpRate",
+            self.exprate_recorder,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+        )
 
     def test_step(self, batch: Batch, _):
-        # Ensure batch is on the correct device
-        device = self.device
-        batch.imgs = batch.imgs.to(device)
-        batch.mask = batch.mask.to(device)
-        
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
         gts = [vocab.indices2words(ind) for ind in batch.indices]
@@ -200,43 +184,7 @@ class LitTAMER(pl.LightningModule):
     def approximate_joint_search(
         self, img: FloatTensor, mask: LongTensor
     ) -> List[Hypothesis]:
-        """Run beam search on the model with error handling
-
-        Parameters
-        ----------
-        img : FloatTensor
-            Input image tensor [b, 1, h, w]
-        mask : LongTensor
-            Input mask tensor [b, h, w]
-
-        Returns
-        -------
-        List[Hypothesis]
-            List of beam search hypotheses
-        """
-        try:
-            # Ensure inputs are on the correct device
-            device = self.device
-            img = img.to(device)
-            mask = mask.to(device)
-            
-            # Extract beam search parameters from hparams
-            beam_params = {
-                'beam_size': self.hparams.beam_size,
-                'max_len': self.hparams.max_len,
-                'alpha': self.hparams.alpha,
-                'early_stopping': self.hparams.early_stopping,
-                'temperature': self.hparams.temperature
-            }
-            
-            # Run beam search with error handling
-            return self.tamer_model.beam_search(img, mask, **beam_params)
-            
-        except Exception as e:
-            print(f"Error in beam search: {e}")
-            # Return empty hypotheses in case of error
-            batch_size = img.shape[0]
-            return [Hypothesis([], 0.0, "l2r") for _ in range(batch_size)]
+        return self.tamer_model.beam_search(img, mask, **self.hparams)
 
     def configure_optimizers(self):
         optimizer = optim.Adadelta(
@@ -245,9 +193,26 @@ class LitTAMER(pl.LightningModule):
             eps=1e-6,
             weight_decay=1e-4,
         )
+        # optimizer = optim.AdamW(
+        #     self.parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4
+        # )
 
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=self.hparams.milestones, gamma=0.1
         )
+        # reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer,
+        #     mode="max",
+        #     factor=0.25,
+        #     patience=self.hparams.patience // self.trainer.check_val_every_n_epoch,
+        # )
+
+        # scheduler = {
+        #     "scheduler": reduce_scheduler,
+        #     "monitor": "val_ExpRate",
+        #     "interval": "epoch",
+        #     "frequency": self.trainer.check_val_every_n_epoch,
+        #     "strict": True,
+        # }
 
         return {"optimizer": optimizer, "lr_scheduler": scheduler}

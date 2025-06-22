@@ -12,31 +12,31 @@
 ```bash
 ├── config/         # config for TAMER hyperparameter
 ├── data/
-│   └── crohme      # CROHME Dataset
-│   └── HME100k      # HME100k Dataset which needs to be downloaded according to the instructions below.
+│   └── crohme      # CROHME Dataset
+│   └── HME100k      # HME100k Dataset which needs to be downloaded according to the instructions below.
 ├── eval/             # evaluation scripts
 ├── tamer               # model definition folder
 ├── lightning_logs      # training logs
-│   └── version_0      # ckpt(w/o fusion) for CROHME dataset 
-│       ├── checkpoints
-│       │   └── epoch=315-step=118815-val_ExpRate=0.6113.ckpt
-│       ├── config.yaml
-│       └── hparams.yaml
-│   └── version_1      # ckpt(w/o fusion) for HME100K dataset 
-│       ├── checkpoints
-│       │   └── epoch=51-step=162967-val_ExpRate=0.6851.ckpt
-│       ├── config.yaml
-│       └── hparams.yaml
-│   └── version_2      # ckpt(w/ fusion) for CROHME dataset 
-│       ├── checkpoints
-│       │   └── 
-│       ├── config.yaml
-│       └── hparams.yaml
-│   └── version_3      # ckpt(w/ fusion) for HME100K dataset 
-│       ├── checkpoints
-│       │   └── epoch=55-step=175503-val_ExpRate=0.6954.ckpt
-│       ├── config.yaml
-│       └── hparams.yaml
+│   └── version_0      # ckpt(w/o fusion) for CROHME dataset 
+│       ├── checkpoints
+│       │   └── epoch=315-step=118815-val_ExpRate=0.6113.ckpt
+│       ├── config.yaml
+│       └── hparams.yaml
+│   └── version_1      # ckpt(w/o fusion) for HME100K dataset 
+│       ├── checkpoints
+│       │   └── epoch=51-step=162967-val_ExpRate=0.6851.ckpt
+│       ├── config.yaml
+│       └── hparams.yaml
+│   └── version_2      # ckpt(w/ fusion) for CROHME dataset 
+│       ├── checkpoints
+│       │   └── 
+│       ├── config.yaml
+│       └── hparams.yaml
+│   └── version_3      # ckpt(w/ fusion) for HME100K dataset 
+│       ├── checkpoints
+│       │   └── epoch=55-step=175503-val_ExpRate=0.6954.ckpt
+│       ├── config.yaml
+│       └── hparams.yaml
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
@@ -47,61 +47,21 @@
 ## Install dependencies   
 ```bash
 cd TAMER
-
-# Phương pháp 1: Sử dụng script cài đặt tự động
-chmod +x setup_env.sh
-./setup_env.sh
-
-# Phương pháp 2: Cài đặt thủ công
-# Tạo môi trường Python venv
-python -m venv env
-source env/bin/activate
-
-# Cài đặt PyTorch (quan trọng: cài đặt PyTorch trước)
-# Cho CUDA (GPU):
-pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu121
-
-# HOẶC cho CPU:
-pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cpu
-
-# Cài đặt Lightning và các thư viện liên quan
-pip install lightning==2.2.1 pytorch-lightning==2.2.1 lightning-utilities==0.10.0
-
-# Cài đặt các dependencies khác
-pip install -r requirements.txt
-
-# Cài đặt project
+# install project   
+conda create -y -n TAMER python=3.7
+conda activate TAMER
+conda install pytorch=1.8.1 torchvision=0.2.2 cudatoolkit=11.1 pillow=8.4.0 -c pytorch -c nvidia
+# training dependency
+conda install pytorch-lightning=1.4.9 torchmetrics=0.6.0 -c conda-forge
+# evaluating dependency
+conda install pandoc=1.19.2.1 -c conda-forge
 pip install -e .
-```
-
-### Xử lý các lỗi cài đặt phổ biến
-
-Nếu bạn gặp lỗi `ModuleNotFoundError: No module named 'torch._C'`:
-- Gỡ cài đặt PyTorch: `pip uninstall torch torchvision -y`
-- Cài đặt lại PyTorch với lệnh phù hợp ở trên
-- Đảm bảo cài đặt PyTorch TRƯỚC khi cài đặt pytorch-lightning
-
-## Cài đặt trên Kaggle
-
-Để cài đặt trên Kaggle:
-1. Tạo một notebook mới
-2. Trong cell đầu tiên, thêm:
-```python
-# Cài đặt các thư viện cần thiết
-!pip install einops==0.7.0 editdistance==0.6.2 pytorch-lightning==2.2.1 torchmetrics==1.2.1 jsonargparse[signatures]==4.27.1 typer==0.9.0
-```
-3. Clone repository và cài đặt:
-```python
-!git clone https://github.com/your-username/TAMER.git
-%cd TAMER
-!pip install -e .
-```
-
+ ```
 ## Dataset Preparation
 We have prepared the CROHME dataset and HME100K dataset in [download link](https://disk.pku.edu.cn/link/AAF10CCC4D539543F68847A9010C607139). After downloading, please extract it to the `data/` folder.
 
 ## Training on CROHME Dataset
-Next, navigate to TAMER folder and run `train.py`. It may take **8~9** hours on **4** NVIDIA GPUs using ddp.
+Next, navigate to TAMER folder and run `train.py`. It may take **8~9** hours on **4** NVIDIA 2080Ti gpus using ddp.
 ```bash
 # train TAMER model using 4 gpus and ddp on CROHME dataset
 python -u train.py --config config/crohme.yaml
@@ -109,17 +69,11 @@ python -u train.py --config config/crohme.yaml
 
 For single gpu user, you may change the `config.yaml` file to
 ```yaml
-devices: 1
-```
-
-For CPU-only training:
-```yaml
-devices: 1
-accelerator: cpu
+gpus: 1
 ```
 
 ## Training on HME100k Dataset
-It may take about **48** hours on **4** NVIDIA GPUs using ddp on HME100k dataset.
+It may take about **48** hours on **4** NVIDIA 2080Ti gpus using ddp on HME100k dataset.
 ```bash
 # train TAMER model using 4 gpus and ddp on hme100k dataset
 python -u train.py --config config/hme100k.yaml
@@ -172,24 +126,4 @@ bash eval/eval_hme100k.sh 1
 - [BTTR](https://github.com/Green-Wood/BTTR) | [arXiv](https://arxiv.org/abs/2105.02412)
 - [TreeDecoder](https://github.com/JianshuZhang/TreeDecoder)
 - [CAN](https://github.com/LBH1024/CAN) | [arXiv](https://arxiv.org/abs/2207.11463)
-
-## Updates for Modern Library Compatibility
-
-This repository has been updated to work with newer versions of PyTorch and PyTorch Lightning. Key updates include:
-
-1. Updated imports from `pytorch_lightning` to `lightning.pytorch` for Lightning 2.x compatibility
-2. Fixed device placement issues to ensure tensors are on the same device during forward passes
-3. Updated configuration parameters for the new Lightning CLI API
-4. Improved error handling throughout the codebase
-5. Created a debug configuration for testing model overfitting
-
-To run the model, use one of these commands:
-
-```bash
-# Training on CROHME dataset
-python train.py --config config/crohme.yaml
-
-# Debug/overfitting version for testing
-python train.py --config config/crohme-debug.yaml
-```
 

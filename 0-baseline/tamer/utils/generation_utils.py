@@ -49,7 +49,7 @@ class DecodeModel(pl.LightningModule):
         early_stopping: bool,
         temperature: float,
     ) -> List[Hypothesis]:
-        """beam search
+        """run beam search to decode
 
         Parameters
         ----------
@@ -61,35 +61,36 @@ class DecodeModel(pl.LightningModule):
         max_len : int
         alpha : float
         early_stopping : bool
-        temperature : float
 
         Returns
         -------
-        List[Hypothesis]
-            [b]
+        List[Hypothesis]: [batch_size,]
         """
-        assert len(src) == 1 and len(src_mask) == 1
-        device = self.device
-        
-        # Ensure src and src_mask are on the correct device
-        src = [s.to(device) for s in src]
-        src_mask = [m.to(device) for m in src_mask]
-
-        batch_size = src[0].shape[0]
+        batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
         batch_beam_size = batch_size * beam_size
         half_bb_size = batch_beam_size // 2
 
-        # l2r and r2l
-        token_l2r = torch.full(
-            (batch_size, 1), fill_value=vocab.SOS_IDX, device=device
-        ).type(torch.long)
-        token_r2l = torch.full(
-            (batch_size, 1), fill_value=vocab.EOS_IDX, device=device
-        ).type(torch.long)
-        input_ids = torch.cat((token_l2r, token_r2l), dim=0)
+        for i in range(len(src)):
+            # [2 * b, t, d], [l2r l2r, r2l r2l]
+            src[i] = torch.cat((src[i], src[i]), dim=0)
+            src_mask[i] = torch.cat((src_mask[i], src_mask[i]), dim=0)
+
+        l2r = torch.full(
+            (batch_size // 2, 1),
+            fill_value=vocab.SOS_IDX,
+            dtype=torch.long,
+            device=self.device,
+        )
+        r2l = torch.full(
+            (batch_size // 2, 1),
+            fill_value=vocab.EOS_IDX,
+            dtype=torch.long,
+            device=self.device,
+        )
+        input_ids = torch.cat((l2r, r2l), dim=0)
 
         beam_scorer = BeamSearchScorer(
-            batch_size, beam_size, alpha, early_stopping, device
+            batch_size, beam_size, alpha, early_stopping, self.device
         )
 
         # first beam search
@@ -109,10 +110,10 @@ class DecodeModel(pl.LightningModule):
 
         lens = [len(h) + 1 for h in hyps]  # plus to append start token
         r2l_tgt, r2l_out = to_tgt_output(
-            hyps[:half_bb_size], "r2l", device, pad_to_len=max(lens)
+            hyps[:half_bb_size], "r2l", self.device, pad_to_len=max(lens)
         )
         l2r_tgt, l2r_out = to_tgt_output(
-            hyps[half_bb_size:], "l2r", device, pad_to_len=max(lens)
+            hyps[half_bb_size:], "l2r", self.device, pad_to_len=max(lens)
         )
         tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
         out = torch.cat((l2r_out, r2l_out), dim=0)
@@ -123,14 +124,14 @@ class DecodeModel(pl.LightningModule):
             (rev_scores[half_bb_size:], rev_scores[:half_bb_size]), dim=0
         )
         # TODO clean the code
-        l2r_tgt, _ = to_tgt_output(hyps, "l2r", device)
-        r2l_tgt, _ = to_tgt_output(hyps, "r2l", device)
+        l2r_tgt, _ = to_tgt_output(hyps, "l2r", self.device)
+        r2l_tgt, _ = to_tgt_output(hyps, "r2l", self.device)
         tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
         _, sim = self.transform(
             [src[0].repeat(2, 1, 1, 1)], [src_mask[0].repeat(2, 1, 1)], tgt
         )
 
-        struct_out, illegal = to_struct_output(hyps, device)
+        struct_out, illegal = to_struct_output(hyps, self.device)
         l = struct_out.shape[1]
         struct_loss = ce_loss(sim, struct_out, ignore_idx=-1, reduction="none")
         struct_loss = rearrange(struct_loss, "(b l) -> b l", l=l)
@@ -152,7 +153,7 @@ class DecodeModel(pl.LightningModule):
         best_split = best_indices // beam_size
         best_indices = best_indices % beam_size
         batch_indices = torch.arange(
-            0, batch_size // 2, dtype=torch.long, device=device
+            0, batch_size // 2, dtype=torch.long, device=self.device
         )
         best_indices = (
             best_split * half_bb_size + batch_indices * beam_size + best_indices
@@ -193,22 +194,16 @@ class DecodeModel(pl.LightningModule):
             List[LongTensor]: [b * beam_size] without SOS or EOS token
             FloatTensor: [b * beam_size] corresponding scores
         """
-        device = self.device
-        
-        # Ensure all inputs are on the correct device
-        src = [s.to(device) for s in src]
-        src_mask = [m.to(device) for m in src_mask]
-        input_ids = input_ids.to(device)
-        
         batch_size, cur_len = input_ids.shape
 
         beam_scores = torch.zeros(
-            batch_size, dtype=torch.float, device=device)
+            batch_size, dtype=torch.float, device=self.device)
 
         while cur_len < max_len and not beam_scorer.is_done():
-            model_inputs = self.transform(src, src_mask, input_ids)
-            next_token_logits = model_inputs[0][:, -1, :] / temperature
-            
+            next_token_logits = (
+                self.transform(src, src_mask, input_ids)[0][
+                    :, -1, :] / temperature
+            )
             # [b *, l, v]
             next_token_scores = F.log_softmax(next_token_logits, dim=-1)
 
@@ -282,14 +277,6 @@ class DecodeModel(pl.LightningModule):
         FloatTensor
             [b * beam_size]
         """
-        device = self.device
-        
-        # Ensure all inputs are on the correct device
-        src = [s.to(device) for s in src]
-        src_mask = [m.to(device) for m in src_mask]
-        tgt = tgt.to(device)
-        out = out.to(device)
-        
         b = tgt.shape[0]
         out_hat = self.transform(src, src_mask, tgt)[0] / temperature
 

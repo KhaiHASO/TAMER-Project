@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 from torch import FloatTensor, LongTensor
 from torch.utils.data.dataloader import DataLoader

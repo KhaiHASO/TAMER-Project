@@ -42,6 +42,7 @@ processed/
 raw/
 notebooks/
 
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -139,6 +140,3 @@ perl_warning.txt
 inkml_temp/
 lg_temp/
 *.egg-info/
-/TAMER-main
-TAMER-main.zip
-env311

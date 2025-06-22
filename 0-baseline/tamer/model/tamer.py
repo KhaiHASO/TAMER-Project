@@ -1,6 +1,6 @@
 from typing import List
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 from torch import FloatTensor, LongTensor
 
@@ -61,10 +61,7 @@ class TAMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
-        # Process through encoder
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
-        
-        # Duplicate for bi-directional processing
         feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
         mask = torch.cat((mask, mask), dim=0)
 
@@ -96,10 +93,7 @@ class TAMER(pl.LightningModule):
         -------
         List[Hypothesis]
         """
-        # Process the image through the encoder
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
-        
-        # Run beam search with the features
         return self.decoder.beam_search(
             [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature
         )

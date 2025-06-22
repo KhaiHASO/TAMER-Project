@@ -1,7 +1,7 @@
 import math
 from typing import Tuple
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

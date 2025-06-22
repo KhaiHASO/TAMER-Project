@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
-from einops import rearrange, repeat
 
 from .arm import AttentionRefinementModule
 
@@ -151,73 +150,6 @@ class MultiheadAttention(nn.Module):
             )
 
 
-def mask_softmax_dropout(dots, attn_mask, key_padding_mask, bsz, num_heads, tgt_len, src_len, dropout_p, training):
-    device = dots.device
-    
-    if attn_mask is not None:
-        # Make sure attn_mask is on the same device as dots
-        attn_mask = attn_mask.to(device)
-        
-        # Check if we need to reshape the attn_mask
-        if attn_mask.dim() == 2:
-            attn_mask = attn_mask.unsqueeze(0)
-        
-        # Reshape attn_mask if needed to match dots dimensions
-        if attn_mask.shape[0] == 1 and bsz * num_heads > 1:
-            # Broadcast the mask to all heads
-            attn_mask = attn_mask.expand(bsz * num_heads, -1, -1)
-        
-        # Check if dimensions match
-        if attn_mask.size(0) != bsz * num_heads or attn_mask.size(1) != tgt_len or attn_mask.size(2) != src_len:
-            print(f"Warning: attn_mask shape {attn_mask.shape} doesn't match required shape ({bsz * num_heads}, {tgt_len}, {src_len})")
-            
-            # Try to reshape or create a new mask
-            if attn_mask.dtype == torch.bool:
-                new_mask = torch.zeros((bsz * num_heads, tgt_len, src_len), dtype=torch.bool, device=device)
-            else:
-                new_mask = torch.zeros((bsz * num_heads, tgt_len, src_len), dtype=attn_mask.dtype, device=device)
-                
-            # Copy as much as we can from the original mask
-            copy_heads = min(attn_mask.size(0), bsz * num_heads)
-            copy_tgt = min(attn_mask.size(1), tgt_len)
-            copy_src = min(attn_mask.size(2), src_len)
-            new_mask[:copy_heads, :copy_tgt, :copy_src] = attn_mask[:copy_heads, :copy_tgt, :copy_src]
-            attn_mask = new_mask
-        
-        # Apply the mask
-        if attn_mask.dtype == torch.bool:
-            dots.masked_fill_(attn_mask, float("-inf"))
-        else:
-            dots += attn_mask
-
-    if key_padding_mask is not None:
-        # Make sure key_padding_mask is on the same device as dots
-        key_padding_mask = key_padding_mask.to(device)
-        
-        # Reshape dots for masking
-        dots_reshaped = dots.view(bsz, num_heads, tgt_len, src_len)
-        
-        # Ensure key_padding_mask has the right shape
-        if key_padding_mask.shape[0] != bsz or key_padding_mask.shape[1] != src_len:
-            # Create a new mask with the right shape
-            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
-            # Copy as much as we can from the original mask
-            copy_rows = min(key_padding_mask.shape[0], bsz)
-            copy_cols = min(key_padding_mask.shape[1], src_len)
-            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
-            key_padding_mask = new_mask
-            
-        # Apply the mask
-        dots_reshaped.masked_fill_(
-            key_padding_mask.unsqueeze(1).unsqueeze(2),
-            float("-inf"),
-        )
-        dots = dots_reshaped.view(bsz * num_heads, tgt_len, src_len)
-
-    attn = F.softmax(dots, dim=-1)
-    attn = F.dropout(attn, p=dropout_p, training=training)
-    return attn
-
 def multi_head_attention_forward(
     query: Tensor,
     key: Tensor,
@@ -226,13 +158,13 @@ def multi_head_attention_forward(
     embed_dim_to_check: int,
     num_heads: int,
     in_proj_weight: Tensor,
-    in_proj_bias: Optional[Tensor],
+    in_proj_bias: Tensor,
     bias_k: Optional[Tensor],
     bias_v: Optional[Tensor],
     add_zero_attn: bool,
     dropout_p: float,
     out_proj_weight: Tensor,
-    out_proj_bias: Optional[Tensor],
+    out_proj_bias: Tensor,
     training: bool = True,
     key_padding_mask: Optional[Tensor] = None,
     need_weights: bool = True,
@@ -249,80 +181,17 @@ def multi_head_attention_forward(
     # allow MHA to have different sizes for the feature dimension
     assert key.size(0) == value.size(0) and key.size(1) == value.size(1)
 
-    # Get the device of the query to ensure consistent device usage
-    device = query.device
-    
-    # Ensure inputs are on the same device
-    key = key.to(device)
-    value = value.to(device)
-    if in_proj_weight is not None:
-        in_proj_weight = in_proj_weight.to(device)
-    if in_proj_bias is not None:
-        in_proj_bias = in_proj_bias.to(device)
-    if out_proj_weight is not None:
-        out_proj_weight = out_proj_weight.to(device)
-    if out_proj_bias is not None:
-        out_proj_bias = out_proj_bias.to(device)
-
     head_dim = embed_dim // num_heads
     assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
     scaling = float(head_dim) ** -0.5
-    
-    # Calculate key size for early key_padding_mask check
-    # This is an estimate that will be updated later when k is fully processed
-    estimated_src_len = key.size(0) if key is not None else 0
-    
-    # Process key_padding_mask early if needed
-    if key_padding_mask is not None:
-        # Make sure key_padding_mask is on the same device
-        key_padding_mask = key_padding_mask.to(device)
-        
-        # Store original mask for later use
-        original_key_padding_mask = key_padding_mask.clone()
-
-    if attn_mask is not None:
-        # Make sure attn_mask is on the same device
-        attn_mask = attn_mask.to(device)
-        
-        if attn_mask.dim() == 2:
-            attn_mask = attn_mask.unsqueeze(0)
-            # Instead of raising an error, reshape the mask if needed
-            if list(attn_mask.size()) != [1, tgt_len, tgt_len]:
-                print(f"Warning: 2D attn_mask shape {attn_mask.shape} doesn't match required shape [1, {tgt_len}, {tgt_len}]")
-                # Create a new mask with the right shape
-                new_mask = torch.zeros((1, tgt_len, tgt_len), 
-                                     dtype=attn_mask.dtype, 
-                                     device=device)
-                # Copy what we can from the original mask
-                copy_rows = min(attn_mask.size(1), tgt_len)
-                copy_cols = min(attn_mask.size(2), tgt_len)
-                new_mask[0, :copy_rows, :copy_cols] = attn_mask[0, :copy_rows, :copy_cols]
-                attn_mask = new_mask
-        elif attn_mask.dim() == 3:
-            # Instead of raising an error, reshape the mask if needed
-            if list(attn_mask.size()) != [bsz * num_heads, tgt_len, tgt_len]:
-                print(f"Warning: 3D attn_mask shape {attn_mask.shape} doesn't match required shape [{bsz * num_heads}, {tgt_len}, {tgt_len}]")
-                # Create a new mask with the right shape
-                new_mask = torch.zeros((bsz * num_heads, tgt_len, tgt_len), 
-                                     dtype=attn_mask.dtype, 
-                                     device=device)
-                # Copy what we can from the original mask
-                copy_batch = min(attn_mask.size(0), bsz * num_heads)
-                copy_rows = min(attn_mask.size(1), tgt_len)
-                copy_cols = min(attn_mask.size(2), tgt_len)
-                new_mask[:copy_batch, :copy_rows, :copy_cols] = attn_mask[:copy_batch, :copy_rows, :copy_cols]
-                attn_mask = new_mask
-        else:
-            print(f"Warning: attn_mask's dimension {attn_mask.dim()} is not supported, creating a default mask")
-            # Create a default mask instead of raising an error
-            attn_mask = torch.zeros((bsz * num_heads, tgt_len, tgt_len), dtype=torch.bool, device=device)
 
     if not use_separate_proj_weight:
         if (query is key or torch.equal(query, key)) and (
             key is value or torch.equal(key, value)
         ):
             # self-attention
-            q, k, v = F.linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
+            q, k, v = F.linear(query, in_proj_weight,
+                               in_proj_bias).chunk(3, dim=-1)
 
         elif key is value or torch.equal(key, value):
             # encoder-decoder attention
@@ -340,6 +209,7 @@ def multi_head_attention_forward(
                 k = None
                 v = None
             else:
+
                 # This is inline in_proj function with in_proj_weight and in_proj_bias
                 _b = in_proj_bias
                 _start = embed_dim
@@ -378,73 +248,86 @@ def multi_head_attention_forward(
             v = F.linear(value, _w, _b)
     else:
         q_proj_weight_non_opt = torch.jit._unwrap_optional(q_proj_weight)
-        k_proj_weight_non_opt = torch.jit._unwrap_optional(k_proj_weight)
-        v_proj_weight_non_opt = torch.jit._unwrap_optional(v_proj_weight)
-        
-        # Move projection weights to query device
-        q_proj_weight_non_opt = q_proj_weight_non_opt.to(device)
-        k_proj_weight_non_opt = k_proj_weight_non_opt.to(device)
-        v_proj_weight_non_opt = v_proj_weight_non_opt.to(device)
-        
-        q = F.linear(query, q_proj_weight_non_opt, in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
-        k = F.linear(key, k_proj_weight_non_opt, in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
-        v = F.linear(value, v_proj_weight_non_opt, in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+        len1, len2 = q_proj_weight_non_opt.size()
+        assert len1 == embed_dim and len2 == query.size(-1)
 
+        k_proj_weight_non_opt = torch.jit._unwrap_optional(k_proj_weight)
+        len1, len2 = k_proj_weight_non_opt.size()
+        assert len1 == embed_dim and len2 == key.size(-1)
+
+        v_proj_weight_non_opt = torch.jit._unwrap_optional(v_proj_weight)
+        len1, len2 = v_proj_weight_non_opt.size()
+        assert len1 == embed_dim and len2 == value.size(-1)
+
+        if in_proj_bias is not None:
+            q = F.linear(query, q_proj_weight_non_opt,
+                         in_proj_bias[0:embed_dim])
+            k = F.linear(
+                key, k_proj_weight_non_opt, in_proj_bias[embed_dim: (
+                    embed_dim * 2)]
+            )
+            v = F.linear(value, v_proj_weight_non_opt,
+                         in_proj_bias[(embed_dim * 2):])
+        else:
+            q = F.linear(query, q_proj_weight_non_opt, in_proj_bias)
+            k = F.linear(key, k_proj_weight_non_opt, in_proj_bias)
+            v = F.linear(value, v_proj_weight_non_opt, in_proj_bias)
     q = q * scaling
 
     if attn_mask is not None:
-        # Make sure attn_mask is on the same device
-        attn_mask = attn_mask.to(device)
-        
+        assert (
+            attn_mask.dtype == torch.float32
+            or attn_mask.dtype == torch.float64
+            or attn_mask.dtype == torch.float16
+            or attn_mask.dtype == torch.uint8
+            or attn_mask.dtype == torch.bool
+        ), "Only float, byte, and bool types are supported for attn_mask, not {}".format(
+            attn_mask.dtype
+        )
+        if attn_mask.dtype == torch.uint8:
+            warnings.warn(
+                "Byte tensor for attn_mask in nn.MultiheadAttention is deprecated. Use bool tensor instead."
+            )
+            attn_mask = attn_mask.to(torch.bool)
+
         if attn_mask.dim() == 2:
             attn_mask = attn_mask.unsqueeze(0)
-            # Instead of raising an error, reshape the mask if needed
-            if list(attn_mask.size()) != [1, tgt_len, tgt_len]:
-                print(f"Warning: 2D attn_mask shape {attn_mask.shape} doesn't match required shape [1, {tgt_len}, {tgt_len}]")
-                # Create a new mask with the right shape
-                new_mask = torch.zeros((1, tgt_len, tgt_len), 
-                                     dtype=attn_mask.dtype, 
-                                     device=device)
-                # Copy what we can from the original mask
-                copy_rows = min(attn_mask.size(1), tgt_len)
-                copy_cols = min(attn_mask.size(2), tgt_len)
-                new_mask[0, :copy_rows, :copy_cols] = attn_mask[0, :copy_rows, :copy_cols]
-                attn_mask = new_mask
+            if list(attn_mask.size()) != [1, query.size(0), key.size(0)]:
+                raise RuntimeError(
+                    "The size of the 2D attn_mask is not correct.")
         elif attn_mask.dim() == 3:
-            # Instead of raising an error, reshape the mask if needed
-            if list(attn_mask.size()) != [bsz * num_heads, tgt_len, tgt_len]:
-                print(f"Warning: 3D attn_mask shape {attn_mask.shape} doesn't match required shape [{bsz * num_heads}, {tgt_len}, {tgt_len}]")
-                # Create a new mask with the right shape
-                new_mask = torch.zeros((bsz * num_heads, tgt_len, tgt_len), 
-                                     dtype=attn_mask.dtype, 
-                                     device=device)
-                # Copy what we can from the original mask
-                copy_batch = min(attn_mask.size(0), bsz * num_heads)
-                copy_rows = min(attn_mask.size(1), tgt_len)
-                copy_cols = min(attn_mask.size(2), tgt_len)
-                new_mask[:copy_batch, :copy_rows, :copy_cols] = attn_mask[:copy_batch, :copy_rows, :copy_cols]
-                attn_mask = new_mask
+            if list(attn_mask.size()) != [bsz * num_heads, query.size(0), key.size(0)]:
+                raise RuntimeError(
+                    "The size of the 3D attn_mask is not correct.")
         else:
-            print(f"Warning: attn_mask's dimension {attn_mask.dim()} is not supported, creating a default mask")
-            # Create a default mask instead of raising an error
-            attn_mask = torch.zeros((bsz * num_heads, tgt_len, tgt_len), dtype=torch.bool, device=device)
+            raise RuntimeError(
+                "attn_mask's dimension {} is not supported".format(
+                    attn_mask.dim())
+            )
+        # attn_mask's dim is 3 now.
 
-    if key_padding_mask is not None:
-        # Make sure key_padding_mask is on the same device
-        key_padding_mask = key_padding_mask.to(device)
-        
-        # Check and fix key_padding_mask dimensions
-        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != estimated_src_len:
-            print(f"Warning: key_padding_mask shape {key_padding_mask.shape} doesn't match required shape ({bsz}, {estimated_src_len})")
-            # Create a new mask with the right shape
-            new_mask = torch.zeros((bsz, estimated_src_len), dtype=torch.bool, device=device)
-            # Copy as much as we can from the original mask
-            copy_rows = min(key_padding_mask.size(0), bsz)
-            copy_cols = min(key_padding_mask.size(1), estimated_src_len)
-            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
-            key_padding_mask = new_mask
+    # convert ByteTensor key_padding_mask to bool
+    if key_padding_mask is not None and key_padding_mask.dtype == torch.uint8:
+        warnings.warn(
+            "Byte tensor for key_padding_mask in nn.MultiheadAttention is deprecated. Use bool tensor instead."
+        )
+        key_padding_mask = key_padding_mask.to(torch.bool)
 
-    # reshape q, k, v for multihead attention and make batch first
+    if bias_k is not None and bias_v is not None:
+        if static_k is None and static_v is None:
+            k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
+            v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
+            if attn_mask is not None:
+                attn_mask = F.pad(attn_mask, (0, 1))
+            if key_padding_mask is not None:
+                key_padding_mask = F.pad(key_padding_mask, (0, 1))
+        else:
+            assert static_k is None, "bias cannot be added to static key."
+            assert static_v is None, "bias cannot be added to static value."
+    else:
+        assert bias_k is None
+        assert bias_v is None
+
     q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
     if k is not None:
         k = k.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
@@ -461,125 +344,72 @@ def multi_head_attention_forward(
         assert static_v.size(2) == head_dim
         v = static_v
 
-    # Now we have the correct src_len from k
     src_len = k.size(1)
-    
-    # Now update key_padding_mask if needed
+
     if key_padding_mask is not None:
-        # Check and fix key_padding_mask dimensions with the correct src_len
-        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
-            print(f"Warning: key_padding_mask shape {key_padding_mask.shape} doesn't match required shape ({bsz}, {src_len})")
-            # Create a new mask with the right shape
-            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
-            # Copy as much as we can from the original mask
-            copy_rows = min(original_key_padding_mask.size(0), bsz)
-            copy_cols = min(original_key_padding_mask.size(1), src_len)
-            if copy_rows > 0 and copy_cols > 0:
-                new_mask[:copy_rows, :copy_cols] = original_key_padding_mask[:copy_rows, :copy_cols]
-            key_padding_mask = new_mask
+        assert key_padding_mask.size(0) == bsz
+        assert key_padding_mask.size(1) == src_len
 
     if add_zero_attn:
         src_len += 1
         k = torch.cat(
-            [k, torch.zeros((k.size(0), 1) + k.size()
-                          [2:], dtype=k.dtype, device=k.device)],
+            [
+                k,
+                torch.zeros(
+                    (k.size(0), 1) + k.size()[2:], dtype=k.dtype, device=k.device
+                ),
+            ],
             dim=1,
         )
         v = torch.cat(
-            [v, torch.zeros((v.size(0), 1) + v.size()
-                          [2:], dtype=v.dtype, device=v.device)],
+            [
+                v,
+                torch.zeros(
+                    (v.size(0), 1) + v.size()[2:], dtype=v.dtype, device=v.device
+                ),
+            ],
             dim=1,
         )
         if attn_mask is not None:
-            attn_mask = pad(attn_mask, (0, 1))
+            attn_mask = F.pad(attn_mask, (0, 1))
         if key_padding_mask is not None:
-            key_padding_mask = pad(key_padding_mask, (0, 1))
+            key_padding_mask = F.pad(key_padding_mask, (0, 1))
 
     attn_output_weights = torch.bmm(q, k.transpose(1, 2))
-    assert list(attn_output_weights.size()) == [bsz * num_heads, tgt_len, src_len]
+    assert list(attn_output_weights.size()) == [
+        bsz * num_heads, tgt_len, src_len]
 
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_output_weights.masked_fill_(attn_mask, float("-inf"))
-        else:
-            attn_output_weights += attn_mask
+    def mask_softmax_dropout(dots):
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                dots.masked_fill_(attn_mask, float("-inf"))
+            else:
+                dots += attn_mask
 
-    if key_padding_mask is not None:
-        attn_output_weights = attn_output_weights.view(
-            bsz, num_heads, tgt_len, src_len)
-        
-        # Ensure key_padding_mask has correct dimensions before using it
-        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
-            # Recreate the mask with correct dimensions
-            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
-            # Copy what we can
-            copy_rows = min(key_padding_mask.size(0), bsz)
-            copy_cols = min(key_padding_mask.size(1), src_len)
-            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
-            key_padding_mask = new_mask
-            
-        # Ensure the expanded mask matches the dimensions of attn_output_weights
-        # The issue is with the broadcasting of the mask to the attention weights
-        try:
-            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
-            # Check if dimensions match for masked_fill operation
-            if expanded_mask.size(0) != attn_output_weights.size(0) or \
-               expanded_mask.size(3) != attn_output_weights.size(3):
-                print(f"Warning: expanded_mask shape {expanded_mask.shape} doesn't match attn_output_weights shape {attn_output_weights.shape}")
-                
-                # Create a new mask with the right shape
-                new_expanded_mask = torch.zeros(
-                    (attn_output_weights.size(0), 1, 1, attn_output_weights.size(3)), 
-                    dtype=torch.bool, 
-                    device=device
-                )
-                
-                # Copy what we can from the original mask
-                copy_rows = min(expanded_mask.size(0), attn_output_weights.size(0))
-                copy_cols = min(expanded_mask.size(3), attn_output_weights.size(3))
-                
-                if copy_rows > 0 and copy_cols > 0:
-                    new_expanded_mask[:copy_rows, :, :, :copy_cols] = expanded_mask[:copy_rows, :, :, :copy_cols]
-                
-                expanded_mask = new_expanded_mask
-            
-            # Apply the mask
-            attn_output_weights = attn_output_weights.masked_fill(
-                expanded_mask,
+        if key_padding_mask is not None:
+            dots = dots.view(bsz, num_heads, tgt_len, src_len)
+            dots = dots.masked_fill(
+                key_padding_mask.unsqueeze(1).unsqueeze(2),
                 float("-inf"),
             )
-        except Exception as e:
-            print(f"Error applying mask in attention: {e}")
-            # If masking fails, continue without masking
-            pass
-            
-        attn_output_weights = attn_output_weights.view(
-            bsz * num_heads, tgt_len, src_len)
+            dots = dots.view(bsz * num_heads, tgt_len, src_len)
 
-    attn_output_weights = F.softmax(attn_output_weights, dim=-1)
-    attn_output_weights = F.dropout(
-        attn_output_weights, p=dropout_p, training=training)
+        attn = F.softmax(dots, dim=-1)
+        attn = F.dropout(attn, p=dropout_p, training=training)
+        return attn
 
-    # ARM module
+    attention = mask_softmax_dropout(attn_output_weights)
     if arm is not None:
-        h = int(src_len ** 0.5)
-        if h * h != src_len:
-            h = 1  # fall back to 1d
-        attn_output_weights = arm(
-            attn_output_weights, key_padding_mask, h, attn_output_weights
-        )
+        attn_output_weights -= arm(attention)
+        attention = mask_softmax_dropout(attn_output_weights)
 
-    attn_output = torch.bmm(attn_output_weights, v)
+    attn_output = torch.bmm(attention, v)
     assert list(attn_output.size()) == [bsz * num_heads, tgt_len, head_dim]
-    attn_output = (
-        attn_output.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
-    )
+    attn_output = attn_output.transpose(
+        0, 1).contiguous().view(tgt_len, bsz, embed_dim)
     attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
 
     if need_weights:
-        # average attention weights over heads
-        attn_output_weights = attn_output_weights.view(
-            bsz, num_heads, tgt_len, src_len)
-        return attn_output, attn_output_weights.sum(dim=1) / num_heads
+        return attn_output, attention
     else:
         return attn_output, None

@@ -6,23 +6,17 @@ from setuptools import find_packages, setup
 
 setup(
     name="tamer",
-    version="0.1.0",
-    description="Tree-Aware Transformer for Handwritten Mathematical Expression Recognition",
+    version="0.0.1",
+    description="",
     author="Jianhua Zhu",
     author_email="zhujianhuapku@pku.edu.cn",
-    url="https://github.com/PKU-ICST-MLNLP/TAMER",
-    python_requires=">=3.10",
+    # REPLACE WITH YOUR OWN GITHUB PROJECT LINK
+    url="",
     install_requires=[
-        "einops>=0.7.0",
-        "editdistance>=0.6.2",
-        "pytorch-lightning>=2.2.0",
-        "torchmetrics>=1.2.0",
-        "jsonargparse[signatures]>=4.27.0",
-        "typer>=0.9.0",
-        "beautifulsoup4>=4.12.0",
-        "lxml>=4.9.0",
-        "pillow>=10.0.0",
-        "pandas>=2.0.0",
+        str(r)
+        for r in pkg_resources.parse_requirements(
+            open(os.path.join(os.path.dirname(__file__), "requirements.txt"))
+        )
     ],
     packages=find_packages(),
 )
