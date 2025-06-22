@@ -267,6 +267,34 @@ def multi_head_attention_forward(
     head_dim = embed_dim // num_heads
     assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
     scaling = float(head_dim) ** -0.5
+    
+    # Calculate key size for early key_padding_mask check
+    # This is an estimate that will be updated later when k is fully processed
+    estimated_src_len = key.size(0) if key is not None else 0
+    
+    # Process key_padding_mask early if needed
+    if key_padding_mask is not None:
+        # Make sure key_padding_mask is on the same device
+        key_padding_mask = key_padding_mask.to(device)
+        
+        # Store original mask for later use
+        original_key_padding_mask = key_padding_mask
+
+    if attn_mask is not None:
+        # Make sure attn_mask is on the same device
+        attn_mask = attn_mask.to(device)
+        
+        if attn_mask.dim() == 2:
+            attn_mask = attn_mask.unsqueeze(0)
+            if list(attn_mask.size()) != [1, tgt_len, tgt_len]:
+                raise RuntimeError("The size of the 2D attn_mask is not correct.")
+        elif attn_mask.dim() == 3:
+            if list(attn_mask.size()) != [bsz * num_heads, tgt_len, tgt_len]:
+                raise RuntimeError("The size of the 3D attn_mask is not correct.")
+        else:
+            raise RuntimeError(
+                "attn_mask's dimension {} is not supported".format(attn_mask.dim())
+            )
 
     if not use_separate_proj_weight:
         if (query is key or torch.equal(query, key)) and (
@@ -364,13 +392,13 @@ def multi_head_attention_forward(
         key_padding_mask = key_padding_mask.to(device)
         
         # Check and fix key_padding_mask dimensions
-        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
-            print(f"Warning: key_padding_mask shape {key_padding_mask.shape} doesn't match required shape ({bsz}, {src_len})")
+        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != estimated_src_len:
+            print(f"Warning: key_padding_mask shape {key_padding_mask.shape} doesn't match required shape ({bsz}, {estimated_src_len})")
             # Create a new mask with the right shape
-            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
+            new_mask = torch.zeros((bsz, estimated_src_len), dtype=torch.bool, device=device)
             # Copy as much as we can from the original mask
             copy_rows = min(key_padding_mask.size(0), bsz)
-            copy_cols = min(key_padding_mask.size(1), src_len)
+            copy_cols = min(key_padding_mask.size(1), estimated_src_len)
             new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
             key_padding_mask = new_mask
 
@@ -391,7 +419,22 @@ def multi_head_attention_forward(
         assert static_v.size(2) == head_dim
         v = static_v
 
+    # Now we have the correct src_len from k
     src_len = k.size(1)
+    
+    # Now update key_padding_mask if needed
+    if key_padding_mask is not None:
+        # Check and fix key_padding_mask dimensions with the correct src_len
+        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
+            print(f"Warning: key_padding_mask shape {key_padding_mask.shape} doesn't match required shape ({bsz}, {src_len})")
+            # Create a new mask with the right shape
+            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
+            # Copy as much as we can from the original mask
+            copy_rows = min(original_key_padding_mask.size(0), bsz)
+            copy_cols = min(original_key_padding_mask.size(1), src_len)
+            if copy_rows > 0 and copy_cols > 0:
+                new_mask[:copy_rows, :copy_cols] = original_key_padding_mask[:copy_rows, :copy_cols]
+            key_padding_mask = new_mask
 
     if add_zero_attn:
         src_len += 1
