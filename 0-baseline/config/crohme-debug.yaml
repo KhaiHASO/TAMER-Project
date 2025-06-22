@@ -13,9 +13,10 @@ trainer:
         filename: '{epoch}-{step}-{val_ExpRate:.4f}'
   gpus: 1
   accelerator: ddp
-  check_val_every_n_epoch: 2
+  check_val_every_n_epoch: 1
   max_epochs: 100
   deterministic: true
+  overfit_batches: 1
 model:
   d_model: 256
   # encoder
