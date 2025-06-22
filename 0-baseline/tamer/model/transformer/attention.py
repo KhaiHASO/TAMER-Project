@@ -226,13 +226,13 @@ def multi_head_attention_forward(
     embed_dim_to_check: int,
     num_heads: int,
     in_proj_weight: Tensor,
-    in_proj_bias: Tensor,
+    in_proj_bias: Optional[Tensor],
     bias_k: Optional[Tensor],
     bias_v: Optional[Tensor],
     add_zero_attn: bool,
     dropout_p: float,
     out_proj_weight: Tensor,
-    out_proj_bias: Tensor,
+    out_proj_bias: Optional[Tensor],
     training: bool = True,
     key_padding_mask: Optional[Tensor] = None,
     need_weights: bool = True,
@@ -244,120 +244,204 @@ def multi_head_attention_forward(
     static_k: Optional[Tensor] = None,
     static_v: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
-    """
-    Cơ chế attention sử dụng logic từ mã nguồn được cung cấp
-    """
-    try:
-        # Lấy kích thước và thiết bị
-        tgt_len, bsz, embed_dim = query.size()
-        src_len = key.size(0)
-        device = query.device
-        
-        # Kiểm tra kích thước embed
-        if embed_dim != embed_dim_to_check:
-            print(f"Warning: embed_dim mismatch: {embed_dim} vs {embed_dim_to_check}")
-        
-        # Tính toán kích thước head
-        head_dim = embed_dim // num_heads
-        scaling = float(head_dim) ** -0.5
-        
-        # Chiếu query, key, value
-        if not use_separate_proj_weight:
-            # Self-attention
-            if (query is key or torch.equal(query, key)) and (key is value or torch.equal(key, value)):
-                q, k, v = F.linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
+    tgt_len, bsz, embed_dim = query.size()
+    assert embed_dim == embed_dim_to_check
+    # allow MHA to have different sizes for the feature dimension
+    assert key.size(0) == value.size(0) and key.size(1) == value.size(1)
+
+    # Get the device of the query to ensure consistent device usage
+    device = query.device
+    
+    # Ensure inputs are on the same device
+    key = key.to(device)
+    value = value.to(device)
+    if in_proj_weight is not None:
+        in_proj_weight = in_proj_weight.to(device)
+    if in_proj_bias is not None:
+        in_proj_bias = in_proj_bias.to(device)
+    if out_proj_weight is not None:
+        out_proj_weight = out_proj_weight.to(device)
+    if out_proj_bias is not None:
+        out_proj_bias = out_proj_bias.to(device)
+
+    head_dim = embed_dim // num_heads
+    assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+    scaling = float(head_dim) ** -0.5
+
+    if not use_separate_proj_weight:
+        if (query is key or torch.equal(query, key)) and (
+            key is value or torch.equal(key, value)
+        ):
+            # self-attention
+            q, k, v = F.linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
+
+        elif key is value or torch.equal(key, value):
+            # encoder-decoder attention
+            # This is inline in_proj function with in_proj_weight and in_proj_bias
+            _b = in_proj_bias
+            _start = 0
+            _end = embed_dim
+            _w = in_proj_weight[_start:_end, :]
+            if _b is not None:
+                _b = _b[_start:_end]
+            q = F.linear(query, _w, _b)
+
+            if key is None:
+                assert value is None
+                k = None
+                v = None
             else:
-                # Encoder-decoder attention
-                q = F.linear(query, in_proj_weight[:embed_dim], in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
-                k = F.linear(key, in_proj_weight[embed_dim:2*embed_dim], in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
-                v = F.linear(value, in_proj_weight[2*embed_dim:], in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+                # This is inline in_proj function with in_proj_weight and in_proj_bias
+                _b = in_proj_bias
+                _start = embed_dim
+                _end = None
+                _w = in_proj_weight[_start:, :]
+                if _b is not None:
+                    _b = _b[_start:]
+                k, v = F.linear(key, _w, _b).chunk(2, dim=-1)
+
         else:
-            q = F.linear(query, q_proj_weight, in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
-            k = F.linear(key, k_proj_weight, in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
-            v = F.linear(value, v_proj_weight, in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+            # This is inline in_proj function with in_proj_weight and in_proj_bias
+            _b = in_proj_bias
+            _start = 0
+            _end = embed_dim
+            _w = in_proj_weight[_start:_end, :]
+            if _b is not None:
+                _b = _b[_start:_end]
+            q = F.linear(query, _w, _b)
+
+            # This is inline in_proj function with in_proj_weight and in_proj_bias
+            _b = in_proj_bias
+            _start = embed_dim
+            _end = embed_dim * 2
+            _w = in_proj_weight[_start:_end, :]
+            if _b is not None:
+                _b = _b[_start:_end]
+            k = F.linear(key, _w, _b)
+
+            # This is inline in_proj function with in_proj_weight and in_proj_bias
+            _b = in_proj_bias
+            _start = embed_dim * 2
+            _end = None
+            _w = in_proj_weight[_start:, :]
+            if _b is not None:
+                _b = _b[_start:]
+            v = F.linear(value, _w, _b)
+    else:
+        q_proj_weight_non_opt = torch.jit._unwrap_optional(q_proj_weight)
+        k_proj_weight_non_opt = torch.jit._unwrap_optional(k_proj_weight)
+        v_proj_weight_non_opt = torch.jit._unwrap_optional(v_proj_weight)
         
-        # Scale query
-        q = q * scaling
+        # Move projection weights to query device
+        q_proj_weight_non_opt = q_proj_weight_non_opt.to(device)
+        k_proj_weight_non_opt = k_proj_weight_non_opt.to(device)
+        v_proj_weight_non_opt = v_proj_weight_non_opt.to(device)
         
-        # Đảm bảo tất cả tensor ở cùng device
-        q = q.to(device)
-        k = k.to(device)
-        v = v.to(device)
+        q = F.linear(query, q_proj_weight_non_opt, in_proj_bias[:embed_dim] if in_proj_bias is not None else None)
+        k = F.linear(key, k_proj_weight_non_opt, in_proj_bias[embed_dim:2*embed_dim] if in_proj_bias is not None else None)
+        v = F.linear(value, v_proj_weight_non_opt, in_proj_bias[2*embed_dim:] if in_proj_bias is not None else None)
+
+    q = q * scaling
+
+    if attn_mask is not None:
+        # Make sure attn_mask is on the same device
+        attn_mask = attn_mask.to(device)
         
-        # Sử dụng phương pháp đơn giản hơn - xử lý từng batch riêng lẻ
-        # Tạo tensor output bắt đầu bằng không
-        attn_output = torch.zeros(tgt_len, bsz, embed_dim, device=device)
-        
-        # Xử lý từng batch
-        for b in range(min(bsz, k.size(1), v.size(1))):
-            # Reshape q, k, v cho batch này
-            q_b = q[:, b, :].view(tgt_len, num_heads, head_dim)
-            k_b = k[:, b, :].view(src_len, num_heads, head_dim)
-            v_b = v[:, b, :].view(src_len, num_heads, head_dim)
-            
-            # Chuyển đổi để tính toán attention
-            q_b = q_b.permute(1, 0, 2)  # [num_heads, tgt_len, head_dim]
-            k_b = k_b.permute(1, 0, 2)  # [num_heads, src_len, head_dim]
-            v_b = v_b.permute(1, 0, 2)  # [num_heads, src_len, head_dim]
-            
-            # Tính toán attention scores
-            attn_weights = torch.zeros(num_heads, tgt_len, src_len, device=device)
-            
-            # Tính dot product cho mỗi head
-            for h in range(num_heads):
-                for i in range(tgt_len):
-                    for j in range(src_len):
-                        attn_weights[h, i, j] = torch.dot(q_b[h, i], k_b[h, j])
-            
-            # Áp dụng key padding mask nếu có
-            if key_padding_mask is not None and b < key_padding_mask.size(0):
-                mask_b = key_padding_mask[b]  # [src_len]
-                for h in range(num_heads):
-                    for i in range(tgt_len):
-                        for j in range(src_len):
-                            if j < mask_b.size(0) and mask_b[j]:
-                                attn_weights[h, i, j] = float('-inf')
-            
-            # Áp dụng softmax để có attention weights
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            
-            # Áp dụng dropout nếu đang trong chế độ training
-            if dropout_p > 0.0 and training:
-                attn_weights = F.dropout(attn_weights, p=dropout_p)
-            
-            # Áp dụng ARM nếu có
-            if arm is not None:
-                # Giả định rằng h (chiều cao) là căn bậc hai của src_len
-                h = int(src_len ** 0.5)
-                if h * h == src_len:  # Kiểm tra nếu src_len là số chính phương
-                    # Reshape attn_weights để sử dụng với ARM
-                    attn_weights_flat = rearrange(attn_weights, "n t l -> (b n) t l", b=1)
-                    # Áp dụng ARM
-                    try:
-                        cov = arm(attn_weights_flat, key_padding_mask[b:b+1] if key_padding_mask is not None else None, h, attn_weights_flat)
-                        # Thêm cov vào attn_weights
-                        attn_weights = rearrange(cov, "(b n) t l -> n t l", b=1)
-                    except Exception as e:
-                        print(f"Lỗi khi áp dụng ARM: {e}")
-            
-            # Áp dụng attention weights vào values
-            attn_output_b = torch.zeros(num_heads, tgt_len, head_dim, device=device)
-            for h in range(num_heads):
-                for i in range(tgt_len):
-                    for j in range(src_len):
-                        attn_output_b[h, i] += attn_weights[h, i, j] * v_b[h, j]
-            
-            # Reshape lại kết quả và lưu vào output
-            attn_output_b = attn_output_b.permute(1, 0, 2)  # [tgt_len, num_heads, head_dim]
-            attn_output_b = attn_output_b.reshape(tgt_len, embed_dim)
-            attn_output[:, b, :] = attn_output_b
-        
-        # Áp dụng output projection
-        attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-        
+        if attn_mask.dim() == 2:
+            attn_mask = attn_mask.unsqueeze(0)
+            if list(attn_mask.size()) != [1, tgt_len, tgt_len]:
+                raise RuntimeError("The size of the 2D attn_mask is not correct.")
+        elif attn_mask.dim() == 3:
+            if list(attn_mask.size()) != [bsz * num_heads, tgt_len, tgt_len]:
+                raise RuntimeError("The size of the 3D attn_mask is not correct.")
+        else:
+            raise RuntimeError(
+                "attn_mask's dimension {} is not supported".format(attn_mask.dim())
+            )
+
+    if key_padding_mask is not None:
+        # Make sure key_padding_mask is on the same device
+        key_padding_mask = key_padding_mask.to(device)
+
+    # reshape q, k, v for multihead attention and make batch first
+    q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+    if k is not None:
+        k = k.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
+    if v is not None:
+        v = v.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
+
+    if static_k is not None:
+        assert static_k.size(0) == bsz * num_heads
+        assert static_k.size(2) == head_dim
+        k = static_k
+
+    if static_v is not None:
+        assert static_v.size(0) == bsz * num_heads
+        assert static_v.size(2) == head_dim
+        v = static_v
+
+    src_len = k.size(1)
+
+    if add_zero_attn:
+        src_len += 1
+        k = torch.cat(
+            [k, torch.zeros((k.size(0), 1) + k.size()
+                          [2:], dtype=k.dtype, device=k.device)],
+            dim=1,
+        )
+        v = torch.cat(
+            [v, torch.zeros((v.size(0), 1) + v.size()
+                          [2:], dtype=v.dtype, device=v.device)],
+            dim=1,
+        )
+        if attn_mask is not None:
+            attn_mask = pad(attn_mask, (0, 1))
+        if key_padding_mask is not None:
+            key_padding_mask = pad(key_padding_mask, (0, 1))
+
+    attn_output_weights = torch.bmm(q, k.transpose(1, 2))
+    assert list(attn_output_weights.size()) == [bsz * num_heads, tgt_len, src_len]
+
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_output_weights.masked_fill_(attn_mask, float("-inf"))
+        else:
+            attn_output_weights += attn_mask
+
+    if key_padding_mask is not None:
+        attn_output_weights = attn_output_weights.view(
+            bsz, num_heads, tgt_len, src_len)
+        attn_output_weights = attn_output_weights.masked_fill(
+            key_padding_mask.unsqueeze(1).unsqueeze(2),
+            float("-inf"),
+        )
+        attn_output_weights = attn_output_weights.view(
+            bsz * num_heads, tgt_len, src_len)
+
+    attn_output_weights = F.softmax(attn_output_weights, dim=-1)
+    attn_output_weights = F.dropout(
+        attn_output_weights, p=dropout_p, training=training)
+
+    # ARM module
+    if arm is not None:
+        h = int(src_len ** 0.5)
+        if h * h != src_len:
+            h = 1  # fall back to 1d
+        attn_output_weights = arm(
+            attn_output_weights, key_padding_mask, h, attn_output_weights
+        )
+
+    attn_output = torch.bmm(attn_output_weights, v)
+    assert list(attn_output.size()) == [bsz * num_heads, tgt_len, head_dim]
+    attn_output = (
+        attn_output.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+    )
+    attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
+
+    if need_weights:
+        # average attention weights over heads
+        attn_output_weights = attn_output_weights.view(
+            bsz, num_heads, tgt_len, src_len)
+        return attn_output, attn_output_weights.sum(dim=1) / num_heads
+    else:
         return attn_output, None
-        
-    except Exception as e:
-        print(f"Lỗi trong attention: {e}")
-        # Trả về query như là fallback
-        return query, None

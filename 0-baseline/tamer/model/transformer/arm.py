@@ -24,6 +24,10 @@ class MaskBatchNorm2d(nn.Module):
         Tensor
             [b, d, h, w]
         """
+        # Ensure both tensors are on the same device
+        device = x.device
+        mask = mask.to(device)
+        
         x = rearrange(x, "b d h w -> b h w d")
         mask = mask.squeeze(1)
 
@@ -76,126 +80,120 @@ class AttentionRefinementModule(nn.Module):
         Tensor
             [(b * nhead), t, l] - Same shape as prev_attn
         """
-        try:
-            # Store original shape for later use
-            original_shape = prev_attn.shape
-            
-            # If curr_attn is not provided, use prev_attn
-            if curr_attn is None:
-                curr_attn = prev_attn
-                
-            # Ensure both are on the same device
-            device = prev_attn.device
+        # Store original shape and device
+        original_shape = prev_attn.shape
+        device = prev_attn.device
+        
+        # If curr_attn is not provided, use prev_attn
+        if curr_attn is None:
+            curr_attn = prev_attn
+        
+        # Make sure curr_attn is on the same device
+        curr_attn = curr_attn.to(device)
+        
+        # Handle key_padding_mask
+        if key_padding_mask is not None:
             key_padding_mask = key_padding_mask.to(device)
-            
-            # Get dimensions
-            b_times_nhead, t, l = prev_attn.shape
-            
-            # Calculate nhead and batch size
-            nhead = self.nhead
+        else:
+            # Create a dummy mask if none provided
+            b_times_nhead, _, l = prev_attn.shape
+            b = b_times_nhead // self.nhead
+            key_padding_mask = torch.zeros((b, l), dtype=torch.bool, device=device)
+        
+        # Get dimensions
+        b_times_nhead, t, l = prev_attn.shape
+        nhead = self.nhead
+        b = b_times_nhead // nhead
+        
+        # Reshape for processing
+        # First ensure that b_times_nhead is divisible by nhead
+        if b_times_nhead % nhead != 0:
+            # Adjust b to make it divisible
             b = b_times_nhead // nhead
-            
-            # Calculate expected width based on length and height
-            w = (l + h - 1) // h  # Ceiling division
-            
-            # Reshape key_padding_mask if needed
-            if key_padding_mask.shape[1] != h * w:
-                new_mask = torch.zeros((b, h * w), dtype=key_padding_mask.dtype, device=device)
-                copy_len = min(key_padding_mask.shape[1], h * w)
-                new_mask[:, :copy_len] = key_padding_mask[:, :copy_len]
-                key_padding_mask = new_mask
-            
-            # Instead of reshaping directly, create new tensors with the right shape
-            # and copy data from the original tensors
-            curr_attn_reshaped = torch.zeros(b, nhead, t, l, device=device)
-            prev_attn_reshaped = torch.zeros(b, nhead, t, l, device=device)
-            
-            # Fill the reshaped tensors
-            for i in range(b):
-                for j in range(nhead):
-                    idx = i * nhead + j
-                    if idx < b_times_nhead:
-                        curr_attn_reshaped[i, j] = curr_attn[idx]
-                        prev_attn_reshaped[i, j] = prev_attn[idx]
-            
-            # Create attns tensor
-            attns = []
-            if self.cross_coverage:
-                attns.append(prev_attn_reshaped)
-            if self.self_coverage:
-                attns.append(curr_attn_reshaped)
-            attns = torch.cat(attns, dim=1)
-            
-            # Cumulative sum along sequence dimension
-            attns = attns.cumsum(dim=2) - attns
-            
-            # Reshape for 2D convolution
-            n_channels = attns.shape[1]  # This should be nhead or 2*nhead
-            
-            # Check if l is divisible by h, if not, pad
-            if l % h != 0:
-                pad_size = h - (l % h)
-                padding = torch.zeros((b, n_channels, t, pad_size), device=device)
-                attns = torch.cat([attns, padding], dim=3)
-                l = attns.shape[3]
-            
-            w = l // h
-            attns = attns.reshape(b * t, n_channels, h, w)
-            
-            # Create mask with matching dimensions
-            mask = key_padding_mask.reshape(b, 1, 1, l)
-            mask = mask.expand(b, 1, t, l)
-            mask = mask.reshape(b * t, 1, h, w)
-            
-            # Ensure mask has the right shape
-            if mask.shape[2:] != attns.shape[2:]:
-                # Create a new mask with the correct dimensions
-                mask = torch.zeros((attns.shape[0], 1, attns.shape[2], attns.shape[3]), 
-                                  dtype=torch.bool, device=device)
-            
-            # Apply convolution
-            cov = self.conv(attns)
-            cov = self.act(cov)
-            
-            # Apply mask
-            cov = cov.masked_fill(mask, 0.0)
-            cov = self.proj(cov)
-            
-            # Apply batch norm
-            cov = self.post_norm(cov, mask)
-            
-            # Reshape back to original format
-            cov = cov.reshape(b, t, nhead, h * w)
-            cov = cov.permute(0, 2, 1, 3).contiguous()
-            
-            # Create output tensor with the same shape as the input
-            output = torch.zeros_like(prev_attn)
-            
-            # Fill the output tensor
-            for i in range(b):
-                for j in range(nhead):
-                    idx = i * nhead + j
-                    if idx < b_times_nhead:
-                        # Get the data for this batch and head
-                        head_data = cov[i, j]
-                        
-                        # Handle size mismatch
-                        if head_data.shape[1] != original_shape[2]:
-                            if head_data.shape[1] < original_shape[2]:
-                                # Pad if smaller
-                                padding = torch.zeros((head_data.shape[0], original_shape[2] - head_data.shape[1]), 
-                                                    device=device)
-                                head_data = torch.cat([head_data, padding], dim=1)
-                            else:
-                                # Truncate if larger
-                                head_data = head_data[:, :original_shape[2]]
-                        
-                        # Copy to output
-                        output[idx] = head_data
-            
-            return output
-            
-        except Exception as e:
-            print(f"Error in ARM module: {e}")
-            # Return zeros as fallback with the same shape as prev_attn
-            return torch.zeros_like(prev_attn)
+            # Create new tensors with the right dimensions
+            new_prev_attn = torch.zeros((b * nhead, t, l), device=device)
+            new_curr_attn = torch.zeros((b * nhead, t, l), device=device)
+            # Copy the data that fits
+            copy_size = min(b_times_nhead, b * nhead)
+            new_prev_attn[:copy_size] = prev_attn[:copy_size]
+            new_curr_attn[:copy_size] = curr_attn[:copy_size]
+            prev_attn = new_prev_attn
+            curr_attn = new_curr_attn
+            b_times_nhead = b * nhead
+        
+        # Now reshape
+        prev_attn_reshaped = prev_attn.view(b, nhead, t, l)
+        curr_attn_reshaped = curr_attn.view(b, nhead, t, l)
+        
+        # Create attns tensor based on coverage types
+        attns = []
+        if self.cross_coverage:
+            attns.append(prev_attn_reshaped)
+        if self.self_coverage:
+            attns.append(curr_attn_reshaped)
+        attns = torch.cat(attns, dim=1)
+        
+        # Cumulative sum along sequence dimension
+        attns = attns.cumsum(dim=2) - attns
+        
+        # Reshape for 2D convolution
+        n_channels = attns.shape[1]  # This should be nhead or 2*nhead
+        
+        # Check if l is divisible by h, if not, pad
+        if l % h != 0:
+            pad_size = h - (l % h)
+            padding = torch.zeros((b, n_channels, t, pad_size), device=device)
+            attns = torch.cat([attns, padding], dim=3)
+            l = attns.shape[3]
+        
+        w = l // h
+        attns = attns.reshape(b * t, n_channels, h, w)
+        
+        # Create mask with matching dimensions
+        # Ensure the key_padding_mask has the right shape first
+        if key_padding_mask.shape[0] != b or key_padding_mask.shape[1] != l:
+            # Create a new mask with the correct dimensions
+            new_mask = torch.zeros((b, l), dtype=torch.bool, device=device)
+            # Copy as much as we can from the original mask
+            copy_rows = min(key_padding_mask.shape[0], b)
+            copy_cols = min(key_padding_mask.shape[1], l)
+            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
+            key_padding_mask = new_mask
+        
+        mask = key_padding_mask.reshape(b, 1, 1, l)
+        mask = mask.expand(b, 1, t, l)
+        mask = mask.reshape(b * t, 1, h, w)
+        
+        # Apply convolution
+        cov = self.conv(attns)
+        cov = self.act(cov)
+        
+        # Apply mask
+        cov = cov.masked_fill(mask, 0.0)
+        cov = self.proj(cov)
+        
+        # Apply batch norm
+        cov = self.post_norm(cov, mask)
+        
+        # Reshape back to original format
+        cov = cov.reshape(b, t, nhead, h * w)
+        cov = cov.permute(0, 2, 1, 3).contiguous()
+        
+        # Trim to the original length if needed
+        if cov.shape[3] > original_shape[2]:
+            cov = cov[:, :, :, :original_shape[2]]
+        
+        # Reshape to match the original input format
+        cov = cov.view(b * nhead, t, -1)
+        
+        # Ensure the output size matches the input
+        if cov.shape[2] < original_shape[2]:
+            # If too short, pad
+            padding = torch.zeros((cov.shape[0], cov.shape[1], original_shape[2] - cov.shape[2]), 
+                               device=device)
+            cov = torch.cat([cov, padding], dim=2)
+        elif cov.shape[2] > original_shape[2]:
+            # If too long, truncate
+            cov = cov[:, :, :original_shape[2]]
+        
+        return cov

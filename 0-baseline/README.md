@@ -173,3 +173,23 @@ bash eval/eval_hme100k.sh 1
 - [TreeDecoder](https://github.com/JianshuZhang/TreeDecoder)
 - [CAN](https://github.com/LBH1024/CAN) | [arXiv](https://arxiv.org/abs/2207.11463)
 
+## Updates for Modern Library Compatibility
+
+This repository has been updated to work with newer versions of PyTorch and PyTorch Lightning. Key updates include:
+
+1. Updated imports from `pytorch_lightning` to `lightning.pytorch` for Lightning 2.x compatibility
+2. Fixed device placement issues to ensure tensors are on the same device during forward passes
+3. Updated configuration parameters for the new Lightning CLI API
+4. Improved error handling throughout the codebase
+5. Created a debug configuration for testing model overfitting
+
+To run the model, use one of these commands:
+
+```bash
+# Training on CROHME dataset
+python train.py --config config/crohme.yaml
+
+# Debug/overfitting version for testing
+python train.py --config config/crohme-debug.yaml
+```
+

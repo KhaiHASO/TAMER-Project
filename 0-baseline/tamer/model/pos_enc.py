@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch
 from einops import rearrange, repeat
 
@@ -38,7 +38,9 @@ class WordPosEnc(pl.LightningModule):
         """
         device = x.device
         _, seq_len, _ = x.size()
-        emb = self.pe[:seq_len, :].to(device)
+        # Get the PE buffer and ensure it's on the right device
+        pe = self.pe.to(device)
+        emb = pe[:seq_len, :]
         x = x + emb[None, :, :]
         return x
 
@@ -83,6 +85,9 @@ class ImgPosEnc(pl.LightningModule):
             [b, h, w, d]
         """
         device = x.device
+        # Ensure mask is on the right device
+        mask = mask.to(device)
+        
         not_mask = ~mask
         y_embed = not_mask.cumsum(1, dtype=torch.float32)
         x_embed = not_mask.cumsum(2, dtype=torch.float32)
@@ -95,11 +100,6 @@ class ImgPosEnc(pl.LightningModule):
             0, self.half_d_model, 2, dtype=torch.float, device=device
         )
         inv_feq = 1.0 / (self.temperature ** (dim_t / self.half_d_model))
-
-        # Ensure all tensors are on the same device
-        x_embed = x_embed.to(device)
-        y_embed = y_embed.to(device)
-        inv_feq = inv_feq.to(device)
 
         pos_x = torch.einsum("b h w, d -> b h w d", x_embed, inv_feq)
         pos_y = torch.einsum("b h w, d -> b h w d", y_embed, inv_feq)
@@ -202,6 +202,9 @@ class ImageRotaryEmbed(pl.LightningModule):
             [b, h, w, d]
         """
         device = x.device
+        # Ensure mask is on the right device
+        mask = mask.to(device)
+        
         not_mask = ~mask
         embed_y = not_mask.cumsum(1, dtype=torch.float32)
         embed_x = not_mask.cumsum(2, dtype=torch.float32)
@@ -214,11 +217,6 @@ class ImageRotaryEmbed(pl.LightningModule):
             0, self.half_d_model, 2, dtype=torch.float, device=device
         )
         inv_feq = 1.0 / (self.temperature ** (dim_t / self.half_d_model))
-
-        # Ensure all tensors are on the same device
-        embed_x = embed_x.to(device)
-        embed_y = embed_y.to(device)
-        inv_feq = inv_feq.to(device)
 
         # [b, h, w, d_model // 4]
         pos_x = torch.einsum("b h w, d -> b h w d", embed_x, inv_feq)

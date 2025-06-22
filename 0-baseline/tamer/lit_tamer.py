@@ -78,19 +78,14 @@ class LitTAMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
-        # Ensure all inputs are on the same device
-        device = self.device
-        img = img.to(device)
-        img_mask = img_mask.to(device)
-        tgt = tgt.to(device)
-        
         return self.tamer_model(img, img_mask, tgt)
 
     def training_step(self, batch: Batch, _):
-        # Ensure batch data is on the correct device
+        # Ensure all batch items are on the same device as the model
         device = self.device
         batch.imgs = batch.imgs.to(device)
-        batch.mask = batch.mask.to(device)
+        batch.mask = batch.mask.to(device) 
+        batch.indices = [idx.to(device) for idx in batch.indices]
         
         tgt, out = to_bi_tgt_out(batch.indices, device)
         struct_out, _ = to_struct_output(batch.indices, device)
@@ -111,10 +106,11 @@ class LitTAMER(pl.LightningModule):
 
 
     def validation_step(self, batch: Batch, _):
-        # Ensure batch data is on the correct device
+        # Ensure all batch items are on the same device as the model
         device = self.device
         batch.imgs = batch.imgs.to(device)
         batch.mask = batch.mask.to(device)
+        batch.indices = [idx.to(device) for idx in batch.indices]
         
         tgt, out = to_bi_tgt_out(batch.indices, device)
         struct_out, _ = to_struct_output(batch.indices, device)
@@ -139,32 +135,24 @@ class LitTAMER(pl.LightningModule):
             sync_dist=True,
         )
 
-        # if self.current_epoch < self.hparams.milestones[0]:
-        #     self.log(
-        #         "val_ExpRate",
-        #         self.exprate_recorder,
-        #         prog_bar=True,
-        #         on_step=False,
-        #         on_epoch=True,
-        #     )
-        #     return
-
-        hyps = self.approximate_joint_search(batch.imgs, batch.mask)
-
-        self.exprate_recorder([h.seq for h in hyps], batch.indices)
-        self.log(
-            "val_ExpRate",
-            self.exprate_recorder,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-        )
+        # Run beam search if we're past the initial training epochs
+        if self.current_epoch >= self.hparams.milestones[0]:
+            hyps = self.approximate_joint_search(batch.imgs, batch.mask)
+            self.exprate_recorder([h.seq for h in hyps], batch.indices)
+            self.log(
+                "val_ExpRate",
+                self.exprate_recorder,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
 
     def test_step(self, batch: Batch, _):
-        # Ensure batch data is on the correct device
+        # Ensure batch is on the correct device
         device = self.device
         batch.imgs = batch.imgs.to(device)
         batch.mask = batch.mask.to(device)
+        batch.indices = [idx.to(device) for idx in batch.indices]
         
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
@@ -173,8 +161,7 @@ class LitTAMER(pl.LightningModule):
 
         return batch.img_bases, preds, gts
 
-    def on_test_epoch_end(self) -> None:
-        test_outputs = self.trainer.results
+    def test_epoch_end(self, test_outputs) -> None:
         exprate = self.exprate_recorder.compute()
         print(f"Validation ExpRate: {exprate}")
         errors_dict = {}
@@ -215,26 +202,9 @@ class LitTAMER(pl.LightningModule):
             eps=1e-6,
             weight_decay=1e-4,
         )
-        # optimizer = optim.AdamW(
-        #     self.parameters(), lr=self.hparams.learning_rate, weight_decay=1e-4
-        # )
 
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=self.hparams.milestones, gamma=0.1
         )
-        # reduce_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer,
-        #     mode="max",
-        #     factor=0.25,
-        #     patience=self.hparams.patience // self.trainer.check_val_every_n_epoch,
-        # )
-
-        # scheduler = {
-        #     "scheduler": reduce_scheduler,
-        #     "monitor": "val_ExpRate",
-        #     "interval": "epoch",
-        #     "frequency": self.trainer.check_val_every_n_epoch,
-        #     "strict": True,
-        # }
 
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
