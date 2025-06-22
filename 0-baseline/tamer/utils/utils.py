@@ -202,7 +202,11 @@ def to_struct_output(
     for idx in indices:
         if isinstance(idx, torch.Tensor):
             # Nếu là tensor, chuyển về list
-            processed_indices.append(idx.cpu().tolist() if idx.is_cuda else idx.tolist())
+            try:
+                processed_indices.append(idx.cpu().tolist() if idx.is_cuda else idx.tolist())
+            except AttributeError:
+                # Nếu không có phương thức tolist(), thử chuyển đổi khác
+                processed_indices.append(list(idx))
         elif isinstance(idx, list):
             # Nếu đã là list, giữ nguyên
             processed_indices.append(idx)
@@ -221,9 +225,10 @@ def to_struct_output(
             r = to_struct(words)
             structs.append(r)
             illegal.append(False)
-        except (AssertionError, IndexError) as e:
+        except (AssertionError, IndexError, TypeError) as e:
             # Nếu không thể chuyển đổi, tạo một cấu trúc rỗng
-            structs.append([-1 for _ in processed_indices[i]])
+            length = len(processed_indices[i]) if processed_indices[i] else 0
+            structs.append([-1 for _ in range(length)])
             illegal.append(True)
 
     batch_size = len(structs)
