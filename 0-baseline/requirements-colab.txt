@@ -1,0 +1,16 @@
+einops
+editdistance
+# for pytorch-lightning CLI
+jsonargparse[signatures]
+# dev-dependency
+flake8
+black
+isort
+jupyter
+opencv-python
+matplotlib
+# for test in crohme
+typer
+beautifulsoup4
+lxml
+torchvision
