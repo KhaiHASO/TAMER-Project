@@ -362,6 +362,17 @@ def multi_head_attention_forward(
     if key_padding_mask is not None:
         # Make sure key_padding_mask is on the same device
         key_padding_mask = key_padding_mask.to(device)
+        
+        # Check and fix key_padding_mask dimensions
+        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
+            print(f"Warning: key_padding_mask shape {key_padding_mask.shape} doesn't match required shape ({bsz}, {src_len})")
+            # Create a new mask with the right shape
+            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
+            # Copy as much as we can from the original mask
+            copy_rows = min(key_padding_mask.size(0), bsz)
+            copy_cols = min(key_padding_mask.size(1), src_len)
+            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
+            key_padding_mask = new_mask
 
     # reshape q, k, v for multihead attention and make batch first
     q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
@@ -411,6 +422,17 @@ def multi_head_attention_forward(
     if key_padding_mask is not None:
         attn_output_weights = attn_output_weights.view(
             bsz, num_heads, tgt_len, src_len)
+        
+        # Ensure key_padding_mask has correct dimensions before using it
+        if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
+            # Recreate the mask with correct dimensions
+            new_mask = torch.zeros((bsz, src_len), dtype=torch.bool, device=device)
+            # Copy what we can
+            copy_rows = min(key_padding_mask.size(0), bsz)
+            copy_cols = min(key_padding_mask.size(1), src_len)
+            new_mask[:copy_rows, :copy_cols] = key_padding_mask[:copy_rows, :copy_cols]
+            key_padding_mask = new_mask
+            
         attn_output_weights = attn_output_weights.masked_fill(
             key_padding_mask.unsqueeze(1).unsqueeze(2),
             float("-inf"),
