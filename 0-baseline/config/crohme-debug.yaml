@@ -8,17 +8,19 @@ trainer:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         save_top_k: 1
-        monitor: val_ExpRate
-        mode: max
-        filename: '{epoch}-{step}-{val_ExpRate:.4f}'
+        monitor: val_loss
+        mode: min
+        filename: '{epoch}-{step}-{val_loss:.4f}'
   devices: 1
   accelerator: gpu
   # For debug
   overfit_batches: 1
   check_val_every_n_epoch: 1
-  max_epochs: 100
+  max_epochs: 10
   log_every_n_steps: 1
   deterministic: true
+  enable_model_summary: true
+  enable_progress_bar: true
 model:
   d_model: 256
   # encoder
@@ -43,14 +45,14 @@ model:
   learning_rate: 1.0
   patience: 20
   milestones:
-    - 50
-    - 75
+    - 5
+    - 8
 data:
   folder: data/crohme
   test_folder: "2014"
   max_size: 320000
   scale_to_limit: true
-  train_batch_size: 4   # giảm batch_size để phù hợp với RAM
+  train_batch_size: 4
   eval_batch_size: 2
   num_workers: 2
   scale_aug: false 

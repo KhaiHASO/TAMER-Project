@@ -68,7 +68,7 @@ class TransformerDecoder(nn.Module):
             )
             
             # Set up ARM function for the next layer if needed
-            if i != len(self.layers) - 1 and self.arm is not None:
+            if i != len(self.layers) - 1 and self.arm is not None and attn is not None and attn.numel() > 0:
                 # Use a clean partial function to avoid memory issues
                 arm_fn = partial(self.arm, key_padding_mask=memory_key_padding_mask, h=height, curr_attn=attn)
 
@@ -121,7 +121,6 @@ class TransformerDecoderLayer(nn.Module):
             memory: the sequence from the last layer of the encoder (required).
             tgt_mask: the mask for the tgt sequence (optional).
             memory_mask: the mask for the memory sequence (optional).
-            tgt_key_padding_mask: the mask for the tgt keys per batch (optional).
             memory_key_padding_mask: the mask for the memory keys per batch (optional).
 
         Shape:
@@ -164,9 +163,11 @@ class TransformerDecoderLayer(nn.Module):
         # Apply ARM if provided
         if arm is not None and attn is not None:
             try:
-                attn = arm(attn)
-                # Recalculate the output using the refined attention
-                tgt2 = torch.bmm(attn, memory.transpose(0, 1)).transpose(0, 1)
+                # Check if the tensor is not empty before applying ARM
+                if attn.numel() > 0:
+                    attn = arm(attn)
+                    # Recalculate the output using the refined attention
+                    tgt2 = torch.bmm(attn, memory.transpose(0, 1)).transpose(0, 1)
             except Exception as e:
                 print(f"ARM application failed: {e}")
         

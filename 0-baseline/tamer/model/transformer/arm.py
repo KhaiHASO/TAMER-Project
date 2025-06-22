@@ -80,6 +80,10 @@ class AttentionRefinementModule(nn.Module):
         Tensor
             [(b * nhead), t, l] - Same shape as prev_attn
         """
+        # Kiểm tra tensor rỗng
+        if prev_attn.numel() == 0:
+            return prev_attn
+
         # Store original shape and device
         original_shape = prev_attn.shape
         device = prev_attn.device
@@ -102,6 +106,11 @@ class AttentionRefinementModule(nn.Module):
         
         # Get dimensions
         b_times_nhead, t, l = prev_attn.shape
+        
+        # Kiểm tra nếu b_times_nhead, t hoặc l bằng 0
+        if b_times_nhead == 0 or t == 0 or l == 0:
+            return prev_attn
+            
         nhead = self.nhead
         b = b_times_nhead // nhead
         
@@ -149,7 +158,6 @@ class AttentionRefinementModule(nn.Module):
         w = l // h
         attns = attns.reshape(b * t, n_channels, h, w)
         
-        # Create mask with matching dimensions
         # Ensure the key_padding_mask has the right shape first
         if key_padding_mask.shape[0] != b or key_padding_mask.shape[1] != l:
             # Create a new mask with the correct dimensions

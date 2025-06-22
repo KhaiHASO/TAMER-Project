@@ -144,6 +144,16 @@ class LitTAMER(pl.LightningModule):
                 on_step=False,
                 on_epoch=True,
             )
+        else:
+            # Log a default value when not calculating to avoid ModelCheckpoint error
+            # Use a small value (0) so it won't be mistakenly chosen as the best model
+            self.log(
+                "val_ExpRate",
+                0.0,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
 
     def test_step(self, batch: Batch, _):
         # Ensure batch is on the correct device
