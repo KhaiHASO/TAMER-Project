@@ -8,28 +8,37 @@ from tamer.utils.utils import Hypothesis
 
 from .decoder import Decoder
 from .encoder import Encoder
+from .vit_encoder import ViTEncoder
 
 
 class TAMER(pl.LightningModule):
     def __init__(
         self,
         d_model: int,
-        growth_rate: int,
-        num_layers: int,
-        nhead: int,
-        num_decoder_layers: int,
-        dim_feedforward: int,
-        dropout: float,
-        dc: int,
-        cross_coverage: bool,
-        self_coverage: bool,
+        # encoder
+        encoder_type: str = "densenet",  # "densenet" or "vit"
+        growth_rate: int = 24,
+        num_layers: int = 16,
+        # decoder
+        nhead: int = 8,
+        num_decoder_layers: int = 3,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.3,
+        dc: int = 32,
+        cross_coverage: bool = True,
+        self_coverage: bool = True,
         vocab_size: int = 114,
     ):
         super().__init__()
 
-        self.encoder = Encoder(
-            d_model=d_model, growth_rate=growth_rate, num_layers=num_layers
-        )
+        # Chọn encoder dựa trên encoder_type
+        if encoder_type == "vit":
+            self.encoder = ViTEncoder(d_model=d_model)
+        else:  # mặc định là densenet
+            self.encoder = Encoder(
+                d_model=d_model, growth_rate=growth_rate, num_layers=num_layers
+            )
+
         self.decoder = Decoder(
             d_model=d_model,
             nhead=nhead,

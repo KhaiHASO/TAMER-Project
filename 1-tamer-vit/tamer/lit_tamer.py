@@ -18,25 +18,26 @@ class LitTAMER(pl.LightningModule):
         self,
         d_model: int,
         # encoder
-        growth_rate: int,
-        num_layers: int,
+        encoder_type: str = "densenet",  # "densenet" or "vit"
+        growth_rate: int = 24,
+        num_layers: int = 16,
         # decoder
-        nhead: int,
-        num_decoder_layers: int,
-        dim_feedforward: int,
-        dropout: float,
-        dc: int,
-        cross_coverage: bool,
-        self_coverage: bool,
+        nhead: int = 8,
+        num_decoder_layers: int = 3,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.3,
+        dc: int = 32,
+        cross_coverage: bool = True,
+        self_coverage: bool = True,
         # beam search
-        beam_size: int,
-        max_len: int,
-        alpha: float,
-        early_stopping: bool,
-        temperature: float,
+        beam_size: int = 10,
+        max_len: int = 150,
+        alpha: float = 1.0,
+        early_stopping: bool = False,
+        temperature: float = 1.0,
         # training
-        learning_rate: float,
-        patience: int,
+        learning_rate: float = 1.0,
+        patience: int = 20,
         milestones: List[int] = [40, 55],
         vocab_size: int = 113,
     ):
@@ -45,6 +46,7 @@ class LitTAMER(pl.LightningModule):
 
         self.tamer_model = TAMER(
             d_model=d_model,
+            encoder_type=encoder_type,
             growth_rate=growth_rate,
             num_layers=num_layers,
             nhead=nhead,
