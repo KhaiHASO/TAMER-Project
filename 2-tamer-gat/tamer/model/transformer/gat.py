@@ -41,7 +41,7 @@ class GraphAttentionLayer(nn.Module):
         
         # Mask out attention to non-connected nodes
         if adj_mat is not None:
-            e = e.masked_fill(adj_mat == 0, -9e15)
+            e = e.masked_fill(adj_mat == 0, -1e4)  # Sử dụng giá trị nhỏ hơn phù hợp với float16
         
         # Attention weights through softmax
         attention = F.softmax(e, dim=2)  # [B, N, N]
