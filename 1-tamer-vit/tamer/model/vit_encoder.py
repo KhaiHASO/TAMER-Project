@@ -83,6 +83,32 @@ class Block(nn.Module):
         x = x + self.mlp(self.norm2(x))
         return x
 
+def interpolate_pos_embed(pos_embed, target_len):
+    """Interpolate position embeddings to a new size."""
+    # Interpolate position embedding for different sequence lengths
+    # Consider the cls token separately
+    cls_pos_embed = pos_embed[:, 0:1, :]
+    patch_pos_embed = pos_embed[:, 1:, :]
+    
+    # Original length of the position embedding
+    src_len = patch_pos_embed.shape[1]
+    
+    # Required length for the sequence
+    tgt_len = target_len - 1  # -1 for cls token
+    
+    # Calculate ratio for interpolation
+    ratio = tgt_len / src_len
+    
+    # Interpolate the patch position embeddings
+    interploated_patch_pos_embed = F.interpolate(
+        patch_pos_embed.permute(0, 2, 1),  # [B, D, L]
+        size=tgt_len,
+        mode='linear'
+    ).permute(0, 2, 1)  # [B, L, D]
+    
+    # Concatenate with the cls token position embedding
+    return torch.cat([cls_pos_embed, interploated_patch_pos_embed], dim=1)
+
 class VisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=1, embed_dim=256, depth=12,
                  num_heads=8, mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0.):
@@ -128,7 +154,14 @@ class VisionTransformer(nn.Module):
         # Add cls token and position embedding
         cls_token = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_token, x), dim=1)
-        x = x + self.pos_embed[:, :x.size(1)]
+        
+        # Add interpolated positional embedding if sequence length doesn't match
+        seq_len = x.size(1)
+        if seq_len != self.pos_embed.size(1):
+            pos_embed = interpolate_pos_embed(self.pos_embed, seq_len)
+            x = x + pos_embed
+        else:
+            x = x + self.pos_embed
         
         # Apply transformer blocks
         for blk in self.blocks:
