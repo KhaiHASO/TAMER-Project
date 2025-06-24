@@ -20,7 +20,6 @@ class LitTAMER(pl.LightningModule):
         # encoder
         growth_rate: int,
         num_layers: int,
-        encoder_type: str = "densenet",  # "densenet" or "vit"
         # decoder
         nhead: int,
         num_decoder_layers: int,
@@ -29,9 +28,6 @@ class LitTAMER(pl.LightningModule):
         dc: int,
         cross_coverage: bool,
         self_coverage: bool,
-        # GAT parameters
-        use_gat: bool = False,
-        gat_layers: int = 2,
         # beam search
         beam_size: int,
         max_len: int,
@@ -43,6 +39,10 @@ class LitTAMER(pl.LightningModule):
         patience: int,
         milestones: List[int] = [40, 55],
         vocab_size: int = 113,
+        # Additional parameters with default values
+        encoder_type: str = "densenet",  # "densenet" or "vit"
+        use_gat: bool = False,
+        gat_layers: int = 2,
     ):
         super().__init__()
         self.save_hyperparameters()
