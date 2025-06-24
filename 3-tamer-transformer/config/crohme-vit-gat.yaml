@@ -5,13 +5,13 @@ data:
   vocab_path: 0-baseline/data/vocab.json
 
 model:
+  # Encoder parameters
   encoder_type: "vit"  # Use ViT encoder
-  use_gat: true  # Enable GAT instead of standard TAM
-  gat_layers: 2  # Number of GAT layers
-  
   d_model: 256
   growth_rate: 24
   num_layers: 16
+  
+  # Decoder parameters
   nhead: 8
   num_decoder_layers: 3
   dim_feedforward: 1024
@@ -19,6 +19,23 @@ model:
   dc: 32
   cross_coverage: true
   self_coverage: true
+  
+  # GAT parameters
+  use_gat: true
+  gat_layers: 2
+  
+  # Beam search parameters
+  beam_size: 10
+  max_len: 250
+  alpha: 1.0
+  early_stopping: true
+  temperature: 1.0
+  
+  # Training parameters
+  learning_rate: 0.0001
+  patience: 5
+  milestones: [40, 55]
+  vocab_size: 113
 
 train:
   gpus: 1
