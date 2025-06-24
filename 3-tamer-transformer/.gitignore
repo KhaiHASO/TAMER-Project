@@ -41,6 +41,7 @@ tests/tests_tt_dir/
 processed/
 raw/
 notebooks/
+*.Identifier
 
 
 # PyInstaller

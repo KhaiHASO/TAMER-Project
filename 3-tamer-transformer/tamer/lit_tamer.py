@@ -20,6 +20,7 @@ class LitTAMER(pl.LightningModule):
         # encoder
         growth_rate: int,
         num_layers: int,
+        encoder_type: str = "densenet",  # "densenet" or "vit"
         # decoder
         nhead: int,
         num_decoder_layers: int,
@@ -28,6 +29,9 @@ class LitTAMER(pl.LightningModule):
         dc: int,
         cross_coverage: bool,
         self_coverage: bool,
+        # GAT parameters
+        use_gat: bool = False,
+        gat_layers: int = 2,
         # beam search
         beam_size: int,
         max_len: int,
@@ -45,6 +49,7 @@ class LitTAMER(pl.LightningModule):
 
         self.tamer_model = TAMER(
             d_model=d_model,
+            encoder_type=encoder_type,
             growth_rate=growth_rate,
             num_layers=num_layers,
             nhead=nhead,
@@ -55,6 +60,8 @@ class LitTAMER(pl.LightningModule):
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
             vocab_size=vocab_size,
+            use_gat=use_gat,
+            gat_layers=gat_layers,
         )
 
         self.exprate_recorder = ExpRateRecorder()

@@ -1,0 +1,47 @@
+data:
+  train_path: data/CROHME/train/
+  valid_path: data/CROHME/valid/
+  test_path: data/CROHME/test2014_2016/
+  vocab_path: 0-baseline/data/vocab.json
+
+model:
+  encoder_type: "vit"  # Use ViT encoder
+  use_gat: true  # Enable GAT instead of standard TAM
+  gat_layers: 2  # Number of GAT layers
+  
+  d_model: 256
+  growth_rate: 24
+  num_layers: 16
+  nhead: 8
+  num_decoder_layers: 3
+  dim_feedforward: 1024
+  dropout: 0.3
+  dc: 32
+  cross_coverage: true
+  self_coverage: true
+
+train:
+  gpus: 1
+  epochs: 50
+  batch_size: 8
+  accumulate_grad_batches: 4
+  precision: 16
+  gradient_clip_val: 5.0
+  auto_lr_find: true
+  fast_dev_run: false
+  log_interval: 100
+  optimizer:
+    name: Adam
+    lr: 0.0001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 5
+
+decode:
+  beam_size: 10
+  max_len: 250
+  alpha: 1.0
+  early_stopping: true
+  temperature: 1.0 
