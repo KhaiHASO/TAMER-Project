@@ -15,7 +15,16 @@ def main(
 ):
     ckp_folder = os.path.join(
         "lightning_logs", f"version_{version}", "checkpoints")
-    fnames = os.listdir(ckp_folder)
+    print(f"Looking for checkpoints in folder: {ckp_folder}")
+    if not os.path.exists(ckp_folder):
+        print(f"ERROR: Checkpoint folder {ckp_folder} does not exist!")
+        return
+    
+    # Filter out files/folders starting with dot (.)
+    all_files = os.listdir(ckp_folder)
+    fnames = [f for f in all_files if not f.startswith('.')]
+    print(f"Found {len(fnames)} checkpoint files in folder: {fnames}")
+    
     assert len(fnames) == 1
     ckp_path = os.path.join(ckp_folder, fnames[0])
     print(f"Test with fname: {fnames[0]}")
